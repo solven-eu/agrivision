@@ -10,9 +10,9 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k)))
-    )
+    caches
+      .keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k))))
   );
   self.clients.claim();
 });
@@ -31,13 +31,15 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(
     caches.match(req).then((cached) => {
       if (cached) return cached;
-      return fetch(req).then((res) => {
-        if (res.ok && (sameOrigin || isStaticLib)) {
-          const clone = res.clone();
-          caches.open(CACHE_VERSION).then((c) => c.put(req, clone));
-        }
-        return res;
-      }).catch(() => cached);  // offline + nothing cached → reject naturally
+      return fetch(req)
+        .then((res) => {
+          if (res.ok && (sameOrigin || isStaticLib)) {
+            const clone = res.clone();
+            caches.open(CACHE_VERSION).then((c) => c.put(req, clone));
+          }
+          return res;
+        })
+        .catch(() => cached); // offline + nothing cached → reject naturally
     })
   );
 });

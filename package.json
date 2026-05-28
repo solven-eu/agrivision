@@ -1,16 +1,25 @@
 {
   "name": "agrivision",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "AgriVision RE — farmer assistant for La Réunion: parcel mapping, crop ID, disease analysis, value estimation.",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "python3 serve-dev.py 8000",
+    "worker": "cd worker && npx wrangler@latest dev --port 8787 --ip 127.0.0.1",
+    "format": "prettier --write \"**/*.{js,mjs,json,html,css,md}\"",
+    "format:check": "prettier --check \"**/*.{js,mjs,json,html,css,md}\"",
+    "test:reload": "node test-with-token.mjs"
   },
-  "keywords": [],
+  "keywords": [
+    "agriculture",
+    "réunion",
+    "claude",
+    "crop"
+  ],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
   "devDependencies": {
-    "playwright": "^1.60.0"
+    "playwright": "^1.60.0",
+    "prettier": "^3.8.3"
   }
 }

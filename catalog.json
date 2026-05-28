@@ -1,29 +1,137 @@
 {
   "_comment": "Application catalog. Keyed by RPG code_cultu. Extend freely. Loaded dynamically by index.html at startup; falls back to a minimal inline default if this file is unreachable. Each entry MAY include: scientific (Linnaean), fr (common FR), emoji, eppo (6-letter Plant Protection Organization code), gbif (GBIF taxon key), wikidata (Wikidata QID), image (local URL override), locals (dialect translations).",
   "crops": {
-    "BAN": { "scientific": "Musa × paradisiaca", "fr": "Bananier",                 "emoji": "🍌", "eppo": "MUSPA", "gbif": 2762752, "wikidata": "Q10757112", "locals": { "rcf": "Bananyé", "gcf": "Bannann" } },
-    "CSU": { "scientific": "Saccharum officinarum","fr": "Canne à sucre",          "emoji": "🎋", "eppo": "SACOF", "gbif": 2703912, "wikidata": "Q3391243",  "locals": { "rcf": "Kann", "gcf": "Kann" } },
-    "BTH": { "scientific": "Triticum aestivum",    "fr": "Blé tendre d'hiver",      "emoji": "🌾", "eppo": "TRZAX", "gbif": 7795888, "wikidata": "Q161098" },
-    "BTP": { "scientific": "Triticum aestivum",    "fr": "Blé tendre de printemps", "emoji": "🌾", "eppo": "TRZAX", "gbif": 7795888, "wikidata": "Q161098" },
-    "TTH": { "scientific": "× Triticosecale",      "fr": "Triticale d'hiver",       "emoji": "🌾", "eppo": "TTLSS", "gbif": 2703325, "wikidata": "Q17484014" },
-    "ORH": { "scientific": "Hordeum vulgare",      "fr": "Orge d'hiver",            "emoji": "🌾", "eppo": "HORVX", "gbif": 2706056, "wikidata": "Q11577" },
-    "MIS": { "scientific": "Zea mays",             "fr": "Maïs",                    "emoji": "🌽", "eppo": "ZEAMX", "gbif": 5290052, "wikidata": "Q11575" },
-    "MIE": { "scientific": "Zea mays",             "fr": "Maïs ensilage",           "emoji": "🌽", "eppo": "ZEAMX", "gbif": 5290052, "wikidata": "Q11575" },
-    "CZH": { "scientific": "Brassica napus",       "fr": "Colza d'hiver",           "emoji": "🌼", "eppo": "BRSNN", "gbif": 3042636, "wikidata": "Q177932" },
-    "TRN": { "scientific": "Helianthus annuus",    "fr": "Tournesol",               "emoji": "🌻", "eppo": "HELAN", "gbif": 9206251, "wikidata": "Q171497" },
-    "VRC": { "scientific": "Vitis vinifera",       "fr": "Vigne raisin de cuve",    "emoji": "🍇", "eppo": "VITVI", "gbif": 5372392, "wikidata": "Q30046" },
-    "VRT": { "scientific": "Vitis vinifera",       "fr": "Vigne raisin de table",   "emoji": "🍇", "eppo": "VITVI", "gbif": 5372392, "wikidata": "Q30046" },
-    "PPH": { "fr": "Prairie permanente herbe",     "emoji": "🌿" },
-    "SPH": { "fr": "Surface pastorale herbacée",   "emoji": "🌿" },
-    "SPL": { "fr": "Surface pastorale ligneuse",   "emoji": "🌳" },
-    "PPR": { "fr": "Prairie en rotation longue",   "emoji": "🌿" },
-    "PTR": { "fr": "Prairie temporaire",           "emoji": "🌱" },
-    "PVT": { "fr": "Verger",                       "emoji": "🍎" },
-    "AGR": { "scientific": "Citrus",               "fr": "Agrumes",                 "emoji": "🍊", "eppo": "1CIDG", "gbif": 3190155, "wikidata": "Q81513",  "locals": { "rcf": "Sitron" } },
-    "JAC": { "fr": "Jachère",                      "emoji": "🪶" },
-    "LDH": { "scientific": "Lavandula",            "fr": "Lavande / lavandin",      "emoji": "💜", "eppo": "1LAVG", "gbif": 2927302, "wikidata": "Q171892" },
-    "FVP": { "scientific": "Vicia faba",           "fr": "Féverole",                "emoji": "🫘", "eppo": "VICFX", "gbif": 2974832, "wikidata": "Q131342" },
+    "BAN": {
+      "scientific": "Musa × paradisiaca",
+      "fr": "Bananier",
+      "emoji": "🍌",
+      "eppo": "MUSPA",
+      "gbif": 2762752,
+      "wikidata": "Q10757112",
+      "locals": { "rcf": "Bananyé", "gcf": "Bannann" }
+    },
+    "CSU": {
+      "scientific": "Saccharum officinarum",
+      "fr": "Canne à sucre",
+      "emoji": "🎋",
+      "eppo": "SACOF",
+      "gbif": 2703912,
+      "wikidata": "Q3391243",
+      "locals": { "rcf": "Kann", "gcf": "Kann" }
+    },
+    "BTH": {
+      "scientific": "Triticum aestivum",
+      "fr": "Blé tendre d'hiver",
+      "emoji": "🌾",
+      "eppo": "TRZAX",
+      "gbif": 7795888,
+      "wikidata": "Q161098"
+    },
+    "BTP": {
+      "scientific": "Triticum aestivum",
+      "fr": "Blé tendre de printemps",
+      "emoji": "🌾",
+      "eppo": "TRZAX",
+      "gbif": 7795888,
+      "wikidata": "Q161098"
+    },
+    "TTH": {
+      "scientific": "× Triticosecale",
+      "fr": "Triticale d'hiver",
+      "emoji": "🌾",
+      "eppo": "TTLSS",
+      "gbif": 2703325,
+      "wikidata": "Q17484014"
+    },
+    "ORH": {
+      "scientific": "Hordeum vulgare",
+      "fr": "Orge d'hiver",
+      "emoji": "🌾",
+      "eppo": "HORVX",
+      "gbif": 2706056,
+      "wikidata": "Q11577"
+    },
+    "MIS": {
+      "scientific": "Zea mays",
+      "fr": "Maïs",
+      "emoji": "🌽",
+      "eppo": "ZEAMX",
+      "gbif": 5290052,
+      "wikidata": "Q11575"
+    },
+    "MIE": {
+      "scientific": "Zea mays",
+      "fr": "Maïs ensilage",
+      "emoji": "🌽",
+      "eppo": "ZEAMX",
+      "gbif": 5290052,
+      "wikidata": "Q11575"
+    },
+    "CZH": {
+      "scientific": "Brassica napus",
+      "fr": "Colza d'hiver",
+      "emoji": "🌼",
+      "eppo": "BRSNN",
+      "gbif": 3042636,
+      "wikidata": "Q177932"
+    },
+    "TRN": {
+      "scientific": "Helianthus annuus",
+      "fr": "Tournesol",
+      "emoji": "🌻",
+      "eppo": "HELAN",
+      "gbif": 9206251,
+      "wikidata": "Q171497"
+    },
+    "VRC": {
+      "scientific": "Vitis vinifera",
+      "fr": "Vigne raisin de cuve",
+      "emoji": "🍇",
+      "eppo": "VITVI",
+      "gbif": 5372392,
+      "wikidata": "Q30046"
+    },
+    "VRT": {
+      "scientific": "Vitis vinifera",
+      "fr": "Vigne raisin de table",
+      "emoji": "🍇",
+      "eppo": "VITVI",
+      "gbif": 5372392,
+      "wikidata": "Q30046"
+    },
+    "PPH": { "fr": "Prairie permanente herbe", "emoji": "🌿" },
+    "SPH": { "fr": "Surface pastorale herbacée", "emoji": "🌿" },
+    "SPL": { "fr": "Surface pastorale ligneuse", "emoji": "🌳" },
+    "PPR": { "fr": "Prairie en rotation longue", "emoji": "🌿" },
+    "PTR": { "fr": "Prairie temporaire", "emoji": "🌱" },
+    "PVT": { "fr": "Verger", "emoji": "🍎" },
+    "AGR": {
+      "scientific": "Citrus",
+      "fr": "Agrumes",
+      "emoji": "🍊",
+      "eppo": "1CIDG",
+      "gbif": 3190155,
+      "wikidata": "Q81513",
+      "locals": { "rcf": "Sitron" }
+    },
+    "JAC": { "fr": "Jachère", "emoji": "🪶" },
+    "LDH": {
+      "scientific": "Lavandula",
+      "fr": "Lavande / lavandin",
+      "emoji": "💜",
+      "eppo": "1LAVG",
+      "gbif": 2927302,
+      "wikidata": "Q171892"
+    },
+    "FVP": {
+      "scientific": "Vicia faba",
+      "fr": "Féverole",
+      "emoji": "🫘",
+      "eppo": "VICFX",
+      "gbif": 2974832,
+      "wikidata": "Q131342"
+    },
     "MLC": { "fr": "Mélange légumineuses / céréales", "emoji": "🌾" },
-    "MDI": { "fr": "Maraîchage diversifié",        "emoji": "🥬" }
+    "MDI": { "fr": "Maraîchage diversifié", "emoji": "🥬" }
   }
 }
