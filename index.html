@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>AgriVision — crop fields + photo analysis</title>
+<title>AgriVision RE — La Réunion crop fields + photo analysis</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="manifest" href="manifest.webmanifest" />
 <link rel="icon" href="icon.svg" type="image/svg+xml" />
@@ -22,9 +22,42 @@
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
-  #app { display: grid; grid-template-columns: 380px 1fr; height: 100vh; }
+  #app { display: grid; grid-template-columns: 380px 1fr; height: 100vh; height: 100dvh; }
   #side { background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto; padding: 16px; }
   #map { height: 100%; }
+  #drawer-handle { display: none; }
+
+  /* ===== Mobile (≤768px): sidebar becomes a bottom drawer ===== */
+  @media (max-width: 768px) {
+    #app { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+    #map { height: 100%; min-height: 0; }
+    #side {
+      position: fixed; left: 0; right: 0; bottom: 0; top: auto;
+      height: 45vh; max-height: 70vh;
+      border-right: none; border-top: 1px solid var(--border);
+      border-radius: 16px 16px 0 0; padding: 8px 14px 16px;
+      transform: translateY(calc(100% - 60px));
+      transition: transform 0.25s ease-out;
+      z-index: 1000;
+      box-shadow: 0 -4px 20px rgba(0,0,0,0.4);
+    }
+    #side.open { transform: translateY(0); }
+    #drawer-handle {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 4px 0 8px; cursor: pointer; user-select: none;
+      position: sticky; top: 0; background: var(--panel); z-index: 1;
+    }
+    #drawer-handle::before {
+      content: ""; display: block; width: 40px; height: 4px;
+      background: var(--muted); border-radius: 2px;
+      margin: 0 auto; position: absolute; left: 50%; transform: translateX(-50%); top: 6px;
+    }
+    #drawer-title { margin-top: 14px; font-weight: 700; font-size: 13px; }
+    #drawer-chevron { margin-top: 14px; font-size: 14px; color: var(--muted); }
+    /* Larger touch targets on mobile */
+    button, .chip { min-height: 32px; }
+    h1 { font-size: 14px; }
+  }
   h1 { font-size: 16px; margin: 0 0 12px; letter-spacing: 0.5px; }
   h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 16px 0 6px; }
   label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
@@ -116,6 +149,15 @@
     display: flex; align-items: center; justify-content: center;
     font-size: 13px; box-shadow: 0 1px 4px rgba(0,0,0,0.4);
   }
+  .photo-pin.no-dir {
+    background: rgba(251,191,36,0.95);
+    box-shadow: 0 0 0 3px rgba(251,191,36,0.35), 0 1px 4px rgba(0,0,0,0.4);
+    animation: pulse-pin 2s ease-in-out infinite;
+  }
+  @keyframes pulse-pin {
+    0%, 100% { box-shadow: 0 0 0 3px rgba(251,191,36,0.35), 0 1px 4px rgba(0,0,0,0.4); }
+    50%      { box-shadow: 0 0 0 6px rgba(251,191,36,0.55), 0 1px 4px rgba(0,0,0,0.4); }
+  }
   .map-placing { cursor: crosshair !important; }
   .lock-hint {
     background: rgba(15,20,25,0.9); color: var(--text);
@@ -127,11 +169,63 @@
   .lock-hint.locked  { border-color: var(--warn); color: var(--warn); }
   .lock-hint.unlocked { border-color: var(--accent); color: var(--accent); }
   .lock-hint.flash   { transform: scale(1.08); background: var(--warn); color: #0a0e13; border-color: var(--warn); }
+  .select-hint {
+    background: var(--accent); color: #0a0e13;
+    padding: 10px 16px; border-radius: 8px;
+    font-size: 14px; font-weight: 700;
+    box-shadow: 0 4px 12px rgba(74,222,128,0.5);
+    animation: pulse-hint 1.8s ease-in-out infinite;
+    cursor: default; user-select: none;
+  }
+  @keyframes pulse-hint {
+    0%, 100% { transform: scale(1); box-shadow: 0 4px 12px rgba(74,222,128,0.5); }
+    50%      { transform: scale(1.04); box-shadow: 0 4px 20px rgba(74,222,128,0.85); }
+  }
+  .parcel-empty {
+    background: var(--panel2); border: 2px dashed var(--accent); border-radius: 6px;
+    padding: 12px; margin-top: 8px; text-align: center; font-size: 12px;
+    color: var(--text);
+  }
+  .parcel-empty .big { font-size: 24px; display: block; margin-bottom: 4px; }
+  .parcel-empty .lead { font-weight: 600; color: var(--accent); }
+  .chat-msg { padding: 6px 10px; border-radius: 8px; line-height: 1.4; max-width: 92%; white-space: pre-wrap; }
+  .chat-msg.user { background: var(--accent); color: #0a0e13; align-self: flex-end; }
+  .chat-msg.assistant { background: var(--panel); border: 1px solid var(--border); align-self: flex-start; }
+  .chat-msg.system { background: transparent; color: var(--muted); font-style: italic; font-size: 11px; align-self: center; }
+  .chat-action {
+    background: transparent; border: 1px solid var(--accent); color: var(--accent);
+    padding: 6px 10px; border-radius: 16px; font-size: 11px; cursor: pointer;
+    transition: background 0.15s;
+  }
+  .chat-action:hover { background: var(--accent); color: #0a0e13; }
+  .chat-typing { color: var(--muted); font-style: italic; padding: 4px 10px; }
   .parcel-emoji {
     font-size: 22px; line-height: 28px; text-align: center;
     text-shadow: 0 0 3px #000, 0 0 6px #000;
     pointer-events: none; user-select: none;
   }
+  #loading-overlay {
+    position: fixed; inset: 0; z-index: 9999;
+    background: rgba(15, 20, 25, 0.78);
+    display: none; flex-direction: column;
+    align-items: center; justify-content: center; gap: 12px;
+    color: var(--text); font-size: 13px;
+    backdrop-filter: blur(2px);
+  }
+  #loading-overlay.show { display: flex; }
+  .spinner {
+    width: 40px; height: 40px; border-radius: 50%;
+    border: 4px solid rgba(255,255,255,0.15);
+    border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading-bar {
+    width: 280px; height: 4px; background: var(--border);
+    border-radius: 2px; overflow: hidden; display: none;
+  }
+  #loading-bar.show { display: block; }
+  #loading-bar-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.25s ease; }
   .disease {
     background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
     padding: 8px 10px; margin-top: 6px;
@@ -150,7 +244,8 @@
 <body>
 <div id="app">
   <aside id="side">
-    <h1>AgriVision FR</h1>
+    <div id="drawer-handle"><span id="drawer-title">Outils</span><span id="drawer-chevron">▲</span></div>
+    <h1>AgriVision RE <span title="La Réunion">🇷🇪</span> <span id="ver" style="color:var(--muted);font-weight:400;font-size:11px;letter-spacing:0;font-family:monospace"></span></h1>
 
     <h2>1. Adresse</h2>
     <div class="row">
@@ -190,7 +285,22 @@
         <option value="gcf">Créole antillais</option>
       </select>
     </div>
-    <div style="margin-top:8px"><button id="analyze" disabled>Analyser</button></div>
+    <div style="margin-top:8px">
+      <div id="chat-log" style="display:flex;flex-direction:column;gap:8px;max-height:380px;overflow-y:auto;padding:6px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;font-size:12px"></div>
+      <div id="chat-actions" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px"></div>
+      <div id="chat-input-row" style="display:flex;gap:6px;margin-top:6px;display:none">
+        <input id="chat-text" type="text" placeholder="Posez une question…" style="flex:1;font-size:12px;padding:6px 8px"/>
+        <button id="chat-send" style="padding:6px 12px">→</button>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+        <button id="chat-start" disabled>💬 Démarrer</button>
+        <button id="report-btn" disabled>📊 Rapport</button>
+        <button id="chat-reset" class="secondary" style="font-size:11px;padding:6px 10px">Recommencer</button>
+        <button id="analyze-pro" class="secondary" disabled
+                title="Plan Pro (à venir) — Sonnet 4.5 + Opus pour des analyses plus fines."
+                style="font-size:11px;padding:6px 10px;opacity:0.6">🌟 Pro</button>
+      </div>
+    </div>
     <div id="analyze-status" class="small" style="margin-top:6px"></div>
 
     <h2>4. Grille normalisée</h2>
@@ -207,6 +317,18 @@
     <h2>☁ Dropbox</h2>
     <div id="dbx-panel" class="small">Désactivé : configure <code>DROPBOX_APP_KEY</code> en haut du script.</div>
 
+    <div id="debug-panel" style="display:none;margin-top:16px;border-top:1px dashed var(--warn);padding-top:8px">
+      <h2 style="color:var(--warn)">🛠 Debug</h2>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="secondary" id="dbg-dump"  style="font-size:11px;padding:4px 8px">Dump localStorage</button>
+        <button class="secondary" id="dbg-token" style="font-size:11px;padding:4px 8px">Copier dbx_token</button>
+        <button class="secondary" id="dbg-reload" style="font-size:11px;padding:4px 8px">Forcer auto-reload</button>
+        <button class="secondary" id="dbg-sw"    style="font-size:11px;padding:4px 8px">Purger SW + caches</button>
+        <button class="secondary" id="dbg-clear" style="font-size:11px;padding:4px 8px;color:var(--bad)">Vider localStorage</button>
+      </div>
+      <pre id="dbg-output" style="margin-top:8px;max-height:240px;overflow:auto;background:var(--panel2);padding:8px;border-radius:4px;font-size:10px;color:var(--muted);white-space:pre-wrap;word-break:break-all"></pre>
+    </div>
+
     <div class="small" style="margin-top:16px; border-top: 1px solid var(--border); padding-top: 8px">
       Sources : <a href="https://adresse.data.gouv.fr" target="_blank">BAN</a> ·
       <a href="https://geoservices.ign.fr" target="_blank">IGN RPG</a> ·
@@ -215,6 +337,12 @@
     </div>
   </aside>
   <div id="map"></div>
+</div>
+
+<div id="loading-overlay" class="show">
+  <div class="spinner"></div>
+  <div id="loading-msg">Chargement de l'application…</div>
+  <div id="loading-bar"><div id="loading-bar-fill"></div></div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -228,7 +356,7 @@
 //      Only safe on file:// for local testing — key is exposed.
 const WORKER_URL = "http://localhost:8787";  // local wrangler dev; replace with deployed URL in prod
 const ANTHROPIC_API_KEY = "";  // only used when WORKER_URL is empty
-const ANTHROPIC_MODEL = "claude-sonnet-4-5";
+const ANTHROPIC_MODEL = "claude-haiku-4-5";  // higher rate limits + cheaper; upgrade to claude-sonnet-4-5 for finer vision
 
 // Dropbox persistence — leave empty to disable.
 // Register an app at https://www.dropbox.com/developers/apps:
@@ -262,6 +390,13 @@ const CULTU_LABELS = {};
 const DEFAULT_VIEW = [-21.115, 55.536];  // La Réunion fallback
 const map = L.map("map", { zoomControl: true }).setView(DEFAULT_VIEW, 10);
 window.map = map;  // expose for Playwright / DevTools debugging
+
+// Loading overlay helpers — declared early so the initial overlay can be updated/hidden
+// even before the Dropbox module initializes its own copies further below.
+const _ovEl = () => document.getElementById("loading-overlay");
+const _msgEl = () => document.getElementById("loading-msg");
+window.__setLoadingMsg = (msg) => { const e = _msgEl(); if (e) e.textContent = msg; };
+window.__hideLoading = () => { _ovEl()?.classList.remove("show"); };
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19, attribution: "© OpenStreetMap"
 }).addTo(map);
@@ -319,9 +454,10 @@ if (navigator.geolocation) {
   navigator.geolocation.getCurrentPosition(
     pos => {
       const { latitude: lat, longitude: lon } = pos.coords;
-      map.setView([lat, lon], 15);
+      // If a saved crop is about to load, don't pan — its fitBounds will dictate the view.
+      if (!pendingDbxLoad) map.setView([lat, lon], 15);
       L.circleMarker([lat, lon], { radius: 6, color: "#4ade80", fillOpacity: 0.8 })
-        .addTo(map).bindPopup("Position actuelle").openPopup();
+        .addTo(map).bindPopup("Position actuelle");
       // Reverse-geocode via BAN so the rest of the flow has an address context.
       fetch(`https://api-adresse.data.gouv.fr/reverse/?lat=${lat}&lon=${lon}`)
         .then(r => r.json())
@@ -355,6 +491,10 @@ let rpgLayer = null;
 let selectedGroups = new Set();
 let addressMarker = null;
 let currentAddress = null;  // { label, lat, lon, city, postcode, context }
+// If a Dropbox token is present at startup, an auto-reload is imminent and will
+// dictate the final map view. Skip eager view-driven work (chip prefetch, geoloc auto-pan)
+// until autoReload concludes.
+let pendingDbxLoad = !!localStorage.getItem("dbx_token");
 
 function refreshRpgLayer() {
   if (rpgLayer) map.removeLayer(rpgLayer);
@@ -481,8 +621,9 @@ refreshRpgLayer = function() {
   layerCtl.addOverlay(rpgLayer, "RPG (parcelles agricoles)");
   if (!wasOnMap) map.removeLayer(rpgLayer);
 };
-// Initial chip load after map settles
-setTimeout(refreshChips, 800);
+// Initial chip load after map settles. Skipped when a Dropbox auto-reload is imminent —
+// loadSession will fitBounds → moveend → refreshChips will fire for the right area.
+if (!pendingDbxLoad) setTimeout(refreshChips, 800);
 
 // ============ Address geocoding ============
 const statusEl = document.getElementById("status");
@@ -519,6 +660,8 @@ const parcelInfoEl = document.getElementById("parcel-info");
 const selectedParcels = new Map();  // id -> { props, geometry }
 const parcelHighlight = L.featureGroup().addTo(map);
 let parcelsLocked = false;
+// "auto" = use RPG bio flag per parcel; "bio" = treat all as BIO; "conventional" = treat all as conventional.
+let bioMode = localStorage.getItem("agri_bio_mode") || "auto";
 
 const featureKey = f =>
   f.id || `${f.properties.pacage}-${f.properties.num_ilot}-${f.properties.num_parcel}-${f.properties.code_cultu}`;
@@ -574,6 +717,7 @@ async function toggleParcelAt(latlng) {
     renderParcelHighlight();
     renderParcelInfoPanel();
     updateLockHint();
+    updateSelectHint();
   } catch (err) {
     parcelInfoEl.innerHTML = `<dt>Erreur</dt><dd>${err.message}</dd>`;
     parcelInfoEl.style.display = "block";
@@ -586,8 +730,10 @@ function renderParcelHighlight() {
     const layer = L.geoJSON(p.geometry, {
       style: { color: "#4ade80", weight: 2, fillColor: "#4ade80", fillOpacity: 0.35 }
     }).addTo(parcelHighlight);
-    // Emoji label at the parcel centroid (geographic bounds center is close enough for visual cue).
-    const meta = cropMeta(p.props?.code_cultu);
+    // Emoji label at the parcel centroid. Identified crop (from analysis) overrides the
+    // RPG-declared code_cultu — useful when RPG is stale, generic, or wrong.
+    const identified = resolveIdentifiedCropMeta();
+    const meta = identified || cropMeta(p.props?.code_cultu);
     if (meta.emoji) {
       const center = layer.getBounds().getCenter();
       L.marker(center, {
@@ -631,7 +777,29 @@ function aggregateParcels() {
 }
 
 function renderParcelInfoPanel() {
-  if (selectedParcels.size === 0) { parcelInfoEl.style.display = "none"; return; }
+  if (selectedParcels.size === 0) {
+    parcelInfoEl.innerHTML = `
+      <div class="parcel-empty">
+        <span class="big">👉</span>
+        <div class="lead">Sélectionnez vos parcelles</div>
+        <div style="margin-top:4px">Cliquez directement sur la carte (zoom ≥ 12) sur les parcelles colorées qui vous intéressent.</div>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
+        <label class="small" style="margin:0">Mode :</label>
+        <select id="bio-mode" style="flex:1;padding:4px 6px;border-radius:4px;border:1px solid var(--border);background:var(--panel);color:var(--text);font-size:11px">
+          <option value="auto"${bioMode==="auto"?" selected":""}>Auto (selon RPG)</option>
+          <option value="bio"${bioMode==="bio"?" selected":""}>🌱 BIO</option>
+          <option value="conventional"${bioMode==="conventional"?" selected":""}>Conventionnel</option>
+        </select>
+      </div>`;
+    parcelInfoEl.style.display = "block";
+    document.getElementById("bio-mode").addEventListener("change", e => {
+      bioMode = e.target.value;
+      localStorage.setItem("agri_bio_mode", bioMode);
+      updateAnalyzeAvailability();
+    });
+    return;
+  }
   const { totalArea, byCrop } = aggregateParcels();
   const lockBadge = parcelsLocked ? ` <span style="color:var(--warn)">🔒</span>` : "";
   let html = `<dt>${selectedParcels.size} parcelle(s) — ${totalArea.toFixed(2)} ha${lockBadge}</dt>`;
@@ -640,6 +808,14 @@ function renderParcelInfoPanel() {
     const bioTag = agg.bio === agg.count ? " 🌱" : agg.bio ? ` (${agg.bio} bio)` : "";
     html += `<dd>${label} <span class="small">(${code})</span> — ${agg.count} × ${agg.area.toFixed(2)} ha${bioTag}</dd>`;
   });
+  html += `<div style="margin-top:8px;display:flex;gap:6px;align-items:center">
+    <label class="small" style="margin:0">Mode :</label>
+    <select id="bio-mode" style="flex:1;padding:4px 6px;border-radius:4px;border:1px solid var(--border);background:var(--panel);color:var(--text);font-size:11px">
+      <option value="auto"${bioMode==="auto"?" selected":""}>Auto (selon RPG)</option>
+      <option value="bio"${bioMode==="bio"?" selected":""}>🌱 BIO</option>
+      <option value="conventional"${bioMode==="conventional"?" selected":""}>Conventionnel</option>
+    </select>
+  </div>`;
   html += `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
     <button class="secondary" id="fit-parcels" style="font-size:11px;padding:4px 8px">🎯 Cadrer</button>
     <button class="secondary" id="lock-parcels" style="font-size:11px;padding:4px 8px">${parcelsLocked ? "🔓 Déverrouiller" : "🔒 Verrouiller"}</button>
@@ -653,6 +829,7 @@ function renderParcelInfoPanel() {
     renderParcelHighlight();
     renderParcelInfoPanel();
     updateLockHint();
+    updateSelectHint();
   };
   document.getElementById("lock-parcels").onclick = () => {
     parcelsLocked = !parcelsLocked;
@@ -661,7 +838,41 @@ function renderParcelInfoPanel() {
     if (parcelsLocked) fitToSelectedParcels();
   };
   document.getElementById("fit-parcels").onclick = () => fitToSelectedParcels();
+  document.getElementById("bio-mode").addEventListener("change", e => {
+    bioMode = e.target.value;
+    localStorage.setItem("agri_bio_mode", bioMode);
+    updateAnalyzeAvailability();
+  });
 }
+
+// On-map hint: prominent "click a parcel" call-to-action shown when nothing is selected.
+let _selectHint = null;
+function updateSelectHint() {
+  if (!_selectHint) {
+    const SelectHint = L.Control.extend({
+      options: { position: "topleft" },
+      onAdd() {
+        const el = L.DomUtil.create("div", "select-hint");
+        L.DomEvent.disableClickPropagation(el);
+        el.innerHTML = "👉 Cliquez une parcelle pour commencer";
+        return el;
+      }
+    });
+    _selectHint = new SelectHint().addTo(map);
+  }
+  const el = _selectHint.getContainer();
+  const show = selectedParcels.size === 0 && map.getZoom() >= 12;
+  el.style.display = show ? "block" : "none";
+  if (map.getZoom() < 12 && selectedParcels.size === 0) {
+    el.style.display = "block";
+    el.innerHTML = "🔍 Zoomez davantage pour cliquer sur une parcelle";
+  } else if (show) {
+    el.innerHTML = "👉 Cliquez une parcelle pour commencer";
+  }
+}
+map.on("zoomend", updateSelectHint);
+// First render: show the empty-state in the side panel + the on-map hint.
+setTimeout(() => { renderParcelInfoPanel(); updateSelectHint(); }, 100);
 
 // On-map hint: a small badge top-left of the map showing lock state.
 let _lockHint = null;
@@ -693,7 +904,8 @@ function updateLockHint() {
 
 // ============ Photos with map locations ============
 const photoEl = document.getElementById("photo");
-const analyzeBtn = document.getElementById("analyze");
+// Backward-compat: photo upload toggles "analyzeBtn" (now the chat-start button).
+const analyzeBtn = document.getElementById("chat-start");
 const aStatus = document.getElementById("analyze-status");
 const thumbsEl = document.getElementById("thumbs");
 const mapEl = document.getElementById("map");
@@ -759,14 +971,39 @@ function placePhotoMarker(p) {
   if (p.marker) map.removeLayer(p.marker);
   if (p.fovLayer) map.removeLayer(p.fovLayer);
   const idx = photos.indexOf(p) + 1;
-  // Pin: arrow shape rotated toward direction when known, else plain disc.
+  // Pin: arrow shape rotated toward direction when known, else amber pulsing disc.
   const html = p.direction != null
     ? `<div class="photo-pin" style="transform:rotate(${p.direction}deg)">▲<span style="position:absolute;font-size:9px;transform:rotate(${-p.direction}deg);color:#fff;font-weight:700">${idx}</span></div>`
-    : `<div class="photo-pin">${idx}</div>`;
+    : `<div class="photo-pin no-dir">${idx}</div>`;
   const icon = L.divIcon({ className: "", html, iconSize: [24, 24], iconAnchor: [12, 12] });
+  const dirTxt = p.direction != null
+    ? ` · 🧭 ${Math.round(p.direction)}° (${cardinal(p.direction)})`
+    : ` · <span style="color:#fbbf24">🧭 direction inconnue</span>`;
+  const popupHtml = `
+    <img src="${p.dataUrl}" style="max-width:240px;display:block;border-radius:4px"/>
+    <div style="font-size:11px;margin-top:6px">${p.name}${dirTxt}</div>
+    <div style="display:flex;gap:4px;margin-top:6px">
+      <button class="popup-aim" data-id="${p.id}" style="font-size:11px;padding:3px 8px;background:#4ade80;color:#0a0e13;border:none;border-radius:4px;font-weight:600;cursor:pointer">🧭 ${p.direction != null ? "Modifier" : "Définir"} direction</button>
+      <button class="popup-move" data-id="${p.id}" style="font-size:11px;padding:3px 8px;background:#232b34;color:#e6edf3;border:1px solid #2f3a45;border-radius:4px;cursor:pointer">📍 Replacer</button>
+    </div>`;
   p.marker = L.marker([p.lat, p.lon], { icon })
     .addTo(map)
-    .bindPopup(`<img src="${p.dataUrl}" style="max-width:240px;display:block"/><div style="font-size:11px;margin-top:4px">${p.name}${p.direction!=null?` · ${Math.round(p.direction)}° (${cardinal(p.direction)})`:""}</div>`);
+    .bindPopup(popupHtml);
+  p.marker.on("popupopen", e => {
+    const root = e.popup.getElement();
+    root.querySelector(".popup-aim")?.addEventListener("click", () => {
+      aimingPhotoId = p.id; placingPhotoId = null;
+      mapEl.classList.add("map-placing");
+      aStatus.textContent = "Cliquez sur la carte vers où la photo a été prise.";
+      p.marker.closePopup();
+    });
+    root.querySelector(".popup-move")?.addEventListener("click", () => {
+      placingPhotoId = p.id; aimingPhotoId = null;
+      mapEl.classList.add("map-placing");
+      aStatus.textContent = "Cliquez sur la carte pour replacer cette photo.";
+      p.marker.closePopup();
+    });
+  });
   // Direction cone (60° FOV, 80 m radius) drawn on the map when direction is known.
   if (p.direction != null) {
     const fov = 60, range = 80;
@@ -797,6 +1034,16 @@ function renderPhotos() {
     const time = p.takenAt
       ? `<div title="${p.takenAt.toLocaleString("fr-FR")}">🕒 ${formatRelativeDays((p.takenAt - Date.now()) / 86400000)}</div>`
       : (p.exifFound ? `<div style="color:var(--muted)">🕒 Pas d'horodatage</div>` : `<div style="color:var(--muted)">🕒 Pas d'EXIF</div>`);
+    // Tags from previous analysis (shot_type, plant count, maturity, etc.)
+    const tags = p.tags || {};
+    const tagBadges = [];
+    if (tags.shot_type && tags.shot_type !== "unknown") tagBadges.push(`<span style="background:var(--panel);padding:1px 5px;border-radius:8px;font-size:9px">${tags.shot_type === "overview" ? "🌄 vue" : tags.shot_type === "single_plant" ? "🌱 plant" : tags.shot_type === "detail" ? "🔍 zoom" : tags.shot_type}</span>`);
+    if (tags.plant_count_visible != null) tagBadges.push(`<span style="background:var(--panel);padding:1px 5px;border-radius:8px;font-size:9px">${tags.plant_count_visible}🌿</span>`);
+    if (tags.maturity_pct_visible != null) tagBadges.push(`<span style="background:var(--panel);padding:1px 5px;border-radius:8px;font-size:9px">M ${tags.maturity_pct_visible}%</span>`);
+    if (tags.health_visible_0_100 != null) tagBadges.push(`<span style="background:var(--panel);padding:1px 5px;border-radius:8px;font-size:9px;color:${tags.health_visible_0_100 > 66 ? "var(--accent)" : tags.health_visible_0_100 > 33 ? "var(--warn)" : "var(--bad)"}">♥ ${tags.health_visible_0_100}</span>`);
+    const repState = p.representative === true ? "✓" : p.representative === false ? "✗" : "?";
+    const repTitle = p.representative === true ? "Représentative du champ" : p.representative === false ? "PAS représentative (atypique)" : "Représentativité inconnue";
+    const repBadge = `<button class="rep-toggle" data-id="${p.id}" title="${repTitle}" style="background:transparent;border:1px solid var(--border);color:inherit;border-radius:8px;padding:1px 5px;font-size:9px;cursor:pointer">Repr. ${repState}</button>`;
     wrap.innerHTML = `
       <div style="position:relative">
         <img src="${p.dataUrl}" alt="${p.name}" />
@@ -805,6 +1052,7 @@ function renderPhotos() {
       <div class="meta">
         <div title="${p.name}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</div>
         ${loc}${dir}${time}
+        ${tagBadges.length || tags.shot_type ? `<div style="display:flex;gap:3px;margin-top:3px;flex-wrap:wrap">${tagBadges.join("")}${repBadge}</div>` : ""}
         <div style="display:flex;gap:4px;margin-top:2px;flex-wrap:wrap">
           <button class="secondary place" data-id="${p.id}">${p.lat != null ? "Replacer" : "📍 Placer"}</button>
           <button class="secondary aim" data-id="${p.id}" ${p.lat == null ? "disabled title='Place la photo d&apos;abord'" : ""}>🧭 Direction</button>
@@ -813,6 +1061,14 @@ function renderPhotos() {
       <button class="del" data-id="${p.id}">×</button>
     `;
     thumbsEl.appendChild(wrap);
+  });
+  thumbsEl.querySelectorAll(".rep-toggle").forEach(b => b.onclick = e => {
+    const id = e.target.dataset.id;
+    const p = photos.find(x => x.id === id);
+    if (!p) return;
+    p.representative = p.representative == null ? true : p.representative === true ? false : null;
+    renderPhotos();
+    DBX.schedule();
   });
   thumbsEl.querySelectorAll(".place").forEach(b => b.onclick = e => {
     placingPhotoId = e.target.dataset.id;
@@ -858,39 +1114,46 @@ function bearingTo(lat1, lon1, lat2, lon2) {
   return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
+// Process a single file → push to photos[] with EXIF, compression, optional tags. Returns the photo object.
+async function addPhotoFromFile(f, presetTags = []) {
+  let gps = null, direction = null, takenAt = null, exifFound = false;
+  try {
+    if (window.exifr) {
+      gps = await exifr.gps(f);
+      const all = await exifr.parse(f, ["GPSImgDirection", "DateTimeOriginal", "CreateDate", "DateTime"]).catch(() => null);
+      if (all) {
+        exifFound = true;
+        if (all.GPSImgDirection != null) direction = all.GPSImgDirection;
+        takenAt = all.DateTimeOriginal || all.CreateDate || all.DateTime || null;
+        if (takenAt && !(takenAt instanceof Date)) takenAt = new Date(takenAt);
+        if (takenAt && isNaN(takenAt.getTime())) takenAt = null;
+      }
+    }
+  } catch {}
+  const { dataUrl, b64, mime, width, height, recompressed } = await compressImage(f);
+  const tagPreset = {};
+  if (presetTags.includes("single_plant")) tagPreset.shot_type = "single_plant";
+  else if (presetTags.includes("overview")) tagPreset.shot_type = "overview";
+  else if (presetTags.includes("detail")) tagPreset.shot_type = "detail";
+  const photo = {
+    id: crypto.randomUUID(),
+    name: f.name, mime, b64, dataUrl, width, height, recompressed,
+    lat: gps?.latitude ?? null, lon: gps?.longitude ?? null,
+    direction, takenAt, exifFound,
+    representative: presetTags.includes("typical") ? true : null,
+    tags: Object.keys(tagPreset).length ? tagPreset : null,
+    locSource: gps?.latitude != null ? "exif" : null,
+    marker: null, fovLayer: null
+  };
+  photos.push(photo);
+  if (photo.lat != null) placePhotoMarker(photo);
+  return photo;
+}
+
 photoEl.addEventListener("change", async () => {
   const files = [...(photoEl.files || [])];
   aStatus.textContent = `Préparation de ${files.length} photo(s)…`;
-  for (const f of files) {
-    // Compress for API (≤5 MB). EXIF GPS+direction must be read from the ORIGINAL file (compressed canvas drops EXIF).
-    let gps = null, direction = null, takenAt = null, exifFound = false;
-    try {
-      if (window.exifr) {
-        gps = await exifr.gps(f);
-        const all = await exifr.parse(f, ["GPSImgDirection", "DateTimeOriginal", "CreateDate", "DateTime"]).catch(() => null);
-        if (all) {
-          exifFound = true;
-          if (all.GPSImgDirection != null) direction = all.GPSImgDirection;
-          takenAt = all.DateTimeOriginal || all.CreateDate || all.DateTime || null;
-          if (takenAt && !(takenAt instanceof Date)) takenAt = new Date(takenAt);
-          if (takenAt && isNaN(takenAt.getTime())) takenAt = null;
-        }
-      }
-    } catch {}
-    const { dataUrl, b64, mime, width, height, recompressed } = await compressImage(f);
-    const photo = {
-      id: crypto.randomUUID(),
-      name: f.name, mime, b64, dataUrl, width, height, recompressed,
-      lat: gps?.latitude ?? null, lon: gps?.longitude ?? null,
-      direction,  // degrees from north (0=N, 90=E), or null
-      takenAt,    // Date or null
-      exifFound,  // whether any EXIF metadata was decoded at all
-      locSource: gps?.latitude != null ? "exif" : null,
-      marker: null, fovLayer: null
-    };
-    photos.push(photo);
-    if (photo.lat != null) placePhotoMarker(photo);
-  }
+  for (const f of files) await addPhotoFromFile(f);
   photoEl.value = "";  // allow re-adding same file
   renderPhotos();
   analyzeBtn.disabled = photos.length === 0;
@@ -941,7 +1204,74 @@ map.on("click", async e => {
   await toggleParcelAt(e.latlng);
 });
 
-// ============ Normalized metrics schema ============
+// ============ Normalized metrics schemas (progressive disclosure) ============
+// Three independent calls, results merged into a single render. Heaviest sections
+// (diseases, market) are deferred so the first scan is cheap + fast.
+
+// Per-photo tagging — Claude returns one entry per uploaded photo.
+const PHOTO_TAG_SCHEMA = {
+  photo_index: "number (1-based) matching the photo's order in the prompt",
+  shot_type: "string — 'overview' (vue large du champ), 'single_plant' (plant individuel), 'detail' (zoom sur feuille/fruit), 'unknown'",
+  crop_code: "string|null — RPG code_cultu si identifiable (BAN, CSU, VRC, etc.) sinon null",
+  plant_count_visible: "number|null — nombre de plants estimé dans la photo",
+  maturity_pct_visible: "number 0-100 — maturité estimée pour ce plant/cette zone",
+  health_visible_0_100: "number — santé visible (0=mort, 100=parfait)",
+  quality_score_0_100: "number — qualité de la photo (luminosité, netteté, cadrage)",
+  representative_likely: "boolean — vraisemblance que ce plant représente la moyenne du champ",
+  observation: "string courte — ce qui est observable spécifiquement sur cette photo"
+};
+
+const FULL_REPORT_SCHEMA = {
+  identification: { dominant_crop_fr: "string", scientific_name: "string", confidence_0_1: "number" },
+  parcels_summary: { count: "number", total_area_ha: "number", crops_breakdown: "array of {code_cultu, area_ha, share_pct}" },
+  health: { vigor_0_100: "number", disease_pressure_0_100: "number", spatial_observations: "array of {photo_index, observation}" },
+  phenology: { current_stage: "string", maturity_pct: "number 0-100", expected_harvest_in_days: "number", expected_harvest_window_iso: "string" },
+  yield: { estimated_t_per_ha: "number", estimated_total_t: "number", confidence_0_1: "number" },
+  market: { indicative_price_eur_per_kg: "number — prix DÉPART PRODUCTEUR (€/kg vendu par l'agriculteur en gros, hors transport et marge aval). Référentiel RNM FranceAgriMer / cours départemental.", estimated_total_value_eur: "number", source_hint: "string", notes: "string" },
+  diseases: "array of {name_fr, name_local, scientific, presence_probability_0_1, yield_impact_pct_if_untreated, treatments: [{name, name_local, type, success_probability_0_1, recovery_pct, cost_breakdown: {materials_eur_per_ha, prep_time_h_per_ha, application_time_h_per_ha, labor_eur_per_h, equipment_eur_per_ha}}]}",
+  photo_tags: `array of objects, one per uploaded photo, each conforming to: ${JSON.stringify(PHOTO_TAG_SCHEMA)}`,
+  cross_check: {
+    consistent_0_1: "number — cohérence entre les photos (overview vs single_plant)",
+    discrepancies: "array of strings — ex: 'photo 2 (plant unique) montre health=30 mais photo 1 (overview) montre 85 — possiblement un plant non représentatif ou un foyer localisé'"
+  },
+  notes: "string — caveats"
+};
+
+const QUICK_SCHEMA = {
+  identification: { dominant_crop_fr: "string", scientific_name: "string", confidence_0_1: "number" },
+  parcels_summary: {
+    count: "number", total_area_ha: "number",
+    crops_breakdown: "array of {code_cultu, area_ha, share_pct}"
+  },
+  health: {
+    vigor_0_100: "number",
+    disease_pressure_0_100: "number — visible overall pressure (the per-disease drill-down is a separate call)",
+    spatial_observations: "array of {photo_index, observation}"
+  },
+  phenology: {
+    current_stage: "string",
+    maturity_pct: "number 0-100",
+    expected_harvest_in_days: "number — days from today",
+    expected_harvest_window_iso: "string YYYY-MM"
+  },
+  notes: "string — caveats"
+};
+
+const DISEASES_SCHEMA = {
+  diseases: "array of disease objects (3-6 most relevant for the identified crop in this region/season). Each: {name_fr, name_local, scientific, presence_probability_0_1, yield_impact_pct_if_untreated, treatments: [{name, name_local, type, success_probability_0_1, recovery_pct, cost_breakdown: {materials_eur_per_ha, prep_time_h_per_ha, application_time_h_per_ha, labor_eur_per_h, equipment_eur_per_ha}}]}"
+};
+
+const MARKET_SCHEMA = {
+  yield: { estimated_t_per_ha: "number", estimated_total_t: "number", confidence_0_1: "number" },
+  market: {
+    indicative_price_eur_per_kg: "number — prix DÉPART PRODUCTEUR (€/kg vendu par l'agriculteur en gros, hors transport et marge aval). Référentiel RNM FranceAgriMer / cours départemental.",
+    estimated_total_value_eur: "number — total_t × price × 1000",
+    source_hint: "string — e.g. 'RNM FranceAgriMer'",
+    notes: "string"
+  }
+};
+
+// Legacy combined schema kept for reload of older culture.json manifests.
 const METRIC_SCHEMA = {
   identification: {
     dominant_crop_fr: "string — nom commun FR (ex: vigne, canne à sucre, banane)",
@@ -970,7 +1300,7 @@ const METRIC_SCHEMA = {
     confidence_0_1: "number"
   },
   market: {
-    indicative_price_eur_per_kg: "number|null",
+    indicative_price_eur_per_kg: "number|null — prix DÉPART PRODUCTEUR (€/kg vendu par l'agriculteur en gros, hors transport)",
     estimated_total_value_eur: "number|null — total_t × price × 1000",
     source_hint: "string — e.g. 'RNM FranceAgriMer'",
     notes: "string"
@@ -1025,6 +1355,30 @@ const CROP_CATALOG = {
 
 function cropMeta(code) {
   return CROP_CATALOG[code] || { fr: code, emoji: "🌱" };
+}
+
+// Find the catalog entry that matches Claude's identification (by scientific name first, then FR).
+// Used to override the parcel emoji when the latest analysis identifies the crop.
+function resolveIdentifiedCropMeta() {
+  const id = (typeof analysisCombined !== "undefined" && analysisCombined?.identification) || null;
+  if (!id) return null;
+  const sci = (id.scientific_name || "").trim().toLowerCase();
+  const fr  = (id.dominant_crop_fr || "").trim().toLowerCase();
+  if (!sci && !fr) return null;
+  // Exact match first
+  for (const meta of Object.values(CROP_CATALOG)) {
+    if (sci && meta.scientific?.toLowerCase() === sci) return meta;
+    if (fr && meta.fr?.toLowerCase() === fr) return meta;
+  }
+  // Substring fallback (e.g. "bananier" matches "banane", scientific genus matches species)
+  const sciGenus = sci.split(/\s+/)[0];
+  for (const meta of Object.values(CROP_CATALOG)) {
+    const mFr = meta.fr?.toLowerCase() || "";
+    const mSci = meta.scientific?.toLowerCase() || "";
+    if (fr && (mFr.includes(fr) || fr.includes(mFr))) return meta;
+    if (sciGenus && mSci.startsWith(sciGenus)) return meta;
+  }
+  return null;
 }
 function rebuildCultuLabels() {
   for (const k of Object.keys(CULTU_LABELS)) delete CULTU_LABELS[k];
@@ -1153,8 +1507,20 @@ function renderMetrics(m) {
   cell("Récolte attendue", `${formatRelativeDays(ph.expected_harvest_in_days)}${ph.expected_harvest_window_iso ? ` <span class="small">(${ph.expected_harvest_window_iso})</span>` : ""}`, { full: true });
   cell("Rendement t/ha", y.estimated_t_per_ha != null ? y.estimated_t_per_ha.toFixed(1) : "—");
   cell("Production totale", y.estimated_total_t != null ? y.estimated_total_t.toFixed(1)+" t" : "—");
-  cell("Prix indicatif", mk.indicative_price_eur_per_kg != null ? mk.indicative_price_eur_per_kg.toFixed(2)+" €/kg" : "—");
-  cell("Valeur estimée", fmtEUR(mk.estimated_total_value_eur), { full: false });
+  // Effective price = user override if set, else model default. Affects total value too.
+  const userPrice = mk.user_price_eur_per_kg;
+  const modelPrice = mk.indicative_price_eur_per_kg;
+  const effPrice = userPrice != null ? userPrice : modelPrice;
+  const priceSource = userPrice != null ? "votre prix" : "défaut RNM";
+  const priceColor = userPrice != null ? "var(--accent)" : "var(--muted)";
+  const priceVal = effPrice != null
+    ? `${effPrice.toFixed(2)} €/kg <span style="font-size:9px;color:${priceColor};font-weight:400">${priceSource}</span> <button id="price-edit" title="Modifier" style="margin-left:6px;background:transparent;border:1px solid var(--border);color:var(--muted);font-size:10px;padding:1px 5px;border-radius:3px;cursor:pointer">✏</button>`
+    : `— <button id="price-edit" title="Définir" style="background:transparent;border:1px solid var(--border);color:var(--muted);font-size:10px;padding:1px 5px;border-radius:3px;cursor:pointer">✏ définir</button>`;
+  cell("Prix vente (départ producteur)", priceVal);
+  // Total value uses effective price.
+  let totalValue = mk.estimated_total_value_eur;
+  if (effPrice != null && y.estimated_total_t != null) totalValue = y.estimated_total_t * 1000 * effPrice;
+  cell("Valeur estimée", fmtEUR(totalValue), { full: false });
   if (Array.isArray(ps.crops_breakdown) && ps.crops_breakdown.length > 1) {
     const txt = ps.crops_breakdown.map(c => `${CULTU_LABELS[c.code_cultu] || c.code_cultu}: ${c.area_ha?.toFixed(2)} ha (${c.share_pct?.toFixed(0)}%)`).join(" · ");
     cell("Répartition cultures", txt, { full: true });
@@ -1163,6 +1529,35 @@ function renderMetrics(m) {
   if (obs) cell("Observations terrain", obs, { full: true });
   if (mk.source_hint || mk.notes) cell("Marché", `${mk.source_hint || ""} ${mk.notes || ""}`.trim(), { full: true });
   if (m.notes) cell("Notes", m.notes, { full: true });
+
+  // Wire the price edit button after cells exist in the DOM.
+  const editBtn = document.getElementById("price-edit");
+  if (editBtn) editBtn.onclick = () => {
+    const current = mk.user_price_eur_per_kg ?? mk.indicative_price_eur_per_kg ?? "";
+    const ans = prompt("Prix de vente départ producteur (€/kg) — laisser vide pour revenir au défaut RNM :", current);
+    if (ans === null) return;
+    const trimmed = String(ans).trim().replace(",", ".");
+    analysisCombined.market = analysisCombined.market || {};
+    if (trimmed === "") {
+      delete analysisCombined.market.user_price_eur_per_kg;
+    } else {
+      const n = parseFloat(trimmed);
+      if (isNaN(n) || n < 0) { alert("Prix invalide."); return; }
+      analysisCombined.market.user_price_eur_per_kg = n;
+    }
+    const eff = analysisCombined.market.user_price_eur_per_kg ?? analysisCombined.market.indicative_price_eur_per_kg;
+    const totT = analysisCombined.yield?.estimated_total_t;
+    if (eff != null && totT != null) analysisCombined.market.estimated_total_value_eur = totT * 1000 * eff;
+    renderMetrics(analysisCombined);
+    if (analysisCombined.diseases) {
+      renderDiseases(analysisCombined.diseases, {
+        t_per_ha: analysisCombined.yield?.estimated_t_per_ha,
+        price_eur_per_kg: eff,  // disease benefit calc uses effective price
+        total_area_ha: analysisCombined.parcels_summary?.total_area_ha
+      });
+    }
+    DBX.setAnalysis({ analysis: analysisCombined, conversation, user_profile: userProfile });
+  };
 }
 
 function treatmentTotalCost(t) {
@@ -1338,7 +1733,14 @@ function buildContextBlock() {
   }
   if (lat == null) { const c = map.getCenter(); lat = c.lat; lon = c.lng; }
 
-  const lines = [`Date du jour : ${todayStr}`, `Dialecte demandé (ISO 639-3) : ${dialect}`];
+  const bioLabel = bioMode === "bio" ? "BIO (agriculture biologique stricte)"
+                  : bioMode === "conventional" ? "Conventionnel"
+                  : "Auto (suivre les flags RPG par parcelle)";
+  const lines = [
+    `Date du jour : ${todayStr}`,
+    `Dialecte demandé (ISO 639-3) : ${dialect}`,
+    `Mode de conduite : ${bioLabel}`
+  ];
   if (currentAddress) {
     lines.push(`Adresse géocodée : ${currentAddress.label}`);
     if (currentAddress.context) lines.push(`Département / région : ${currentAddress.context}`);
@@ -1352,6 +1754,14 @@ function buildContextBlock() {
     Object.entries(byCrop).forEach(([code, agg]) => {
       const label = CULTU_LABELS[code] || code;
       lines.push(`  - ${label} [code_cultu=${code}, catégorie=${agg.category}] : ${agg.count} parcelle(s), ${agg.area.toFixed(2)} ha${agg.bio ? `, dont ${agg.bio} en bio` : ""}`);
+    });
+    // Per-parcel detail with centroid lat/lon — lets the model reason about exact location, sun exposure, slope adjacency.
+    lines.push(`\nDétail par parcelle :`);
+    [...selectedParcels.values()].forEach((p, i) => {
+      const a = parcelArea(p.props).toFixed(3);
+      const [lat0, lon0] = p.latlng;  // click point ~ inside the parcel
+      const label = CULTU_LABELS[p.props.code_cultu] || p.props.code_cultu || "?";
+      lines.push(`  ${i+1}. ${label} (code_cultu=${p.props.code_cultu}) · ${a} ha · centre ≈ ${lat0.toFixed(5)},${lon0.toFixed(5)}${p.props.bio === 1 ? " · bio" : ""}`);
     });
   } else {
     lines.push("Aucune parcelle RPG sélectionnée — pas de prior officiel sur la culture.");
@@ -1384,57 +1794,353 @@ function inputFingerprint() {
     photos.map(p => `${p.id}@${p.lat ?? "?"},${p.lon ?? "?"}|${p.direction ?? "?"}`).sort().join("||"),
     document.getElementById("dialect")?.value || "fr"
   ];
-  return parts.join("§");
+  return parts.join("§") + "§bio=" + bioMode;
 }
 let lastAnalyzedFingerprint = null;
+
+function setButtonsDisabled(d) {
+  const start = document.getElementById("chat-start");
+  if (start) start.disabled = d || conversation.length > 0;
+  const send = document.getElementById("chat-send");
+  if (send) send.disabled = d;
+  const report = document.getElementById("report-btn");
+  if (report) report.disabled = d || (photos.length === 0 && selectedParcels.size === 0);
+}
 
 function updateAnalyzeAvailability() {
   const fp = inputFingerprint();
   const hasPhotos = photos.length > 0;
-  const sameAsLast = lastAnalyzedFingerprint != null && fp === lastAnalyzedFingerprint;
-  const disabled = !hasPhotos || sameAsLast;
-  analyzeBtn.disabled = disabled;
-  if (!hasPhotos) {
-    aStatus.textContent = aStatus.textContent.includes("recompressée") ? aStatus.textContent : "";
-  } else if (sameAsLast) {
-    aStatus.textContent = "Analyse à jour — modifie une photo/parcelle pour relancer.";
-  } else if (lastAnalyzedFingerprint != null) {
-    aStatus.textContent = "Données modifiées — relance disponible.";
+  const hasParcels = selectedParcels.size > 0;
+  const hasInputs = hasPhotos || hasParcels;
+  const start = document.getElementById("chat-start");
+  if (start && conversation.length === 0) start.disabled = !hasInputs || chatBusy;
+  if (conversation.length > 0) {
+    const top = Object.entries(userProfile.scores || {})
+      .filter(([, v]) => v > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([k, v]) => `${k} ${v}`)
+      .join(" / ");
+    aStatus.textContent = `${conversation.length} tour(s)${top ? " · " + top : ""}`;
+  } else if (!hasInputs) {
+    aStatus.textContent = "Sélectionnez une parcelle ou ajoutez une photo pour démarrer.";
+  } else {
+    aStatus.textContent = `${photos.length} photo(s) · ${selectedParcels.size} parcelle(s) — prêt à démarrer.`;
   }
 }
 
-async function analyze() {
+// Parse Claude's response defensively. Common failure modes:
+//   1. Surrounded by chatter / markdown fences despite the prompt.
+//   2. Trailing comma before } or ].
+//   3. Truncated mid-array (max_tokens hit) — auto-close brackets in stack order.
+function robustParseJson(text) {
+  if (!text) throw new Error("Réponse vide");
+  // Extract JSON between first { and last } / strip markdown fences.
+  let s = text.trim().replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
+  const firstBrace = s.indexOf("{");
+  const lastBrace = s.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) s = s.slice(firstBrace, lastBrace + 1);
+  // Quick attempt
+  try { return JSON.parse(s); } catch {}
+  // Remove trailing commas before ] or }
+  let cleaned = s.replace(/,(\s*[}\]])/g, "$1");
+  try { return JSON.parse(cleaned); } catch {}
+  // Auto-close: scan and close unclosed brackets / strings (truncation recovery).
+  cleaned = autoCloseJson(cleaned);
+  try { return JSON.parse(cleaned); }
+  catch (e) {
+    throw new Error(`JSON invalide: ${e.message}. Premiers 200 chars: ${s.slice(0, 200)}…`);
+  }
+}
+
+function autoCloseJson(s) {
+  const stack = [];
+  let inStr = false, escape = false;
+  let lastValidEnd = -1;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (escape) { escape = false; continue; }
+    if (c === "\\") { escape = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === "{" || c === "[") stack.push(c);
+    else if (c === "}" || c === "]") {
+      const open = stack.pop();
+      if (!open) break;
+    }
+    if (stack.length === 0 && (c === "}" || c === "]")) lastValidEnd = i + 1;
+  }
+  // If string was unterminated, drop the partial token
+  if (inStr) {
+    const lastComma = s.lastIndexOf(",", s.length - 1);
+    if (lastComma > 0) s = s.slice(0, lastComma);
+    else s = s.slice(0, s.length);
+  }
+  // Trim partial trailing content after the last complete value
+  if (stack.length > 0) {
+    // Remove anything that looks like a partial key:"val..."
+    s = s.replace(/,\s*"[^"]*":\s*[^,\]}]*$/, "");
+    s = s.replace(/,\s*\{[^}]*$/, "");
+    s = s.replace(/,\s*\[[^\]]*$/, "");
+    // Close brackets in reverse order
+    while (stack.length > 0) {
+      const open = stack.pop();
+      s += (open === "{") ? "}" : "]";
+    }
+  }
+  return s;
+}
+
+// ============ Conversational chat module ============
+let analysisCombined = null;             // accumulated structured findings (legacy + chat-extracted)
+let conversation = [];                   // [{ role: "user"|"assistant", content: "...", actions?: [...], turn: N }]
+// Multi-dimensional profile: the user can be e.g. 80% farmer + 60% investor + 20% agronomist
+// simultaneously. Updated each turn from the conversation. 0-100 per dimension.
+let userProfile = {
+  scores: { farmer: 0, agronomist: 0, investor: 0, consumer: 0, researcher: 0 },
+  primary_concerns: [],
+  expertise_0_100: 0,
+  inferred_from_turns: []
+};
+let chatBusy = false;
+
+const CHAT_SYSTEM_PROMPT = `Tu es l'assistant agronome conversationnel d'AgriVision RE, spécialisé pour les agriculteurs de La Réunion (et DOM-TOM, métropole en second). L'utilisateur sélectionne ses parcelles sur une carte, prend des photos avec son téléphone, et te parle.
+
+Ton style :
+- Réponses TRÈS courtes (1-3 phrases). Pas de pavé. L'utilisateur est probablement sur son téléphone, dans un champ.
+- Ton terrain, direct, professionnel. Pas de blabla.
+- Si tu as une photo, identifie-la sans détour ("Je vois un bananier au stade…"). Si pas de photo, demande ou déduis du contexte RPG.
+- Propose toujours 2 à 4 actions claires comme suite (next_actions).
+
+Types d'actions :
+
+**Actions conversationnelles** (continuent la discussion via texte) :
+- "diseases" : analyse des risques maladie
+- "yield_market" : rendement + prix + valeur estimée
+- "rotate" : suggestion de rotation
+- "irrigation", "fertilization", "harvest_window", "phyto" : sujets agronomiques
+- "free_text" : invite l'utilisateur à poser une question libre
+
+**Actions UI** (côté client ouvre une interface ; l'utilisateur agit puis te répond) :
+- "take_photo" : demande à l'utilisateur de prendre une photo. Précise tags : ["single_plant" | "overview" | "detail"], optionnellement "typical" (à marquer comme représentative), optionnellement "camera" + "now" (forcer l'ouverture caméra). Exemple : { id: "take_photo", tags: ["single_plant", "typical", "camera", "now"], label: "📷 Photographier un plant typique" }
+- "retake_photo" : recommande de re-photographier (photos anciennes : >7j stade végétatif, >3j suspicion maladie active, >14j suivi maturité). Précise dans le label LAQUELLE re-prendre.
+- "mark_typical" : invite à désigner parmi les photos existantes celle qui est représentative.
+- "add_parcel" : invite à sélectionner une parcelle supplémentaire sur la carte.
+
+Quand tu proposes une action UI, l'utilisateur la complète puis ses résultats te reviennent comme message texte "[Action: …]" — tu peux alors continuer (analyser la nouvelle photo, demander mark_typical, etc.).
+
+Recommande PROACTIVEMENT les actions photo (more_photos, retake_photos) quand pertinent : c'est ce qui rend les analyses futures plus fiables.
+
+Profil utilisateur — MULTI-DIMENSIONNEL : tu retournes profile_update avec un score 0-100 par profil. L'utilisateur peut être SIMULTANÉMENT farmer + investor (ex: agriculteur qui pense ROI). Mets à jour SEULEMENT les dimensions que tu peux légitimement scorer ; laisse les autres inchangées (ne renvoie pas les dimensions non observées dans profile_update). Profils :
+- farmer : préoccupations terrain, agronomie pratique, travail concret
+- agronomist : vocabulaire technique (BBCH, IFT, présence symptomatique), précision scientifique
+- investor : ROI, marché, rendement, valeur €
+- consumer : qualité produit, traçabilité, label
+- researcher : méthodologie, biostatistique, comparaison référentielles
+
+Adapte ton ton aux DEUX ou TROIS dimensions les plus fortes (score > 40).
+
+Format de sortie : UNIQUEMENT du JSON valide, pas de markdown :
+{
+  "message": "1-3 phrases.",
+  "next_actions": [{ "id": "diseases|yield_market|rotate|more_photos|retake_photos|free_text|...", "label": "Texte court du bouton" }],
+  "profile_update": { "scores": { "farmer": 75, "investor": 55 }, "primary_concerns": ["disease_pressure"], "expertise_0_100": 60 },
+  "metrics_update": { "identification": {...}, "health": {...}, "phenology": {...} }
+}
+
+metrics_update est OPTIONNEL : à n'inclure QUE si tu produis des données structurées (identification après vue d'une photo, diagnostic maladies, etc.). Utilise les schémas habituels (identification, health, phenology, diseases, yield, market).`;
+
+// User-facing action handlers. Each takes the action object (with optional tags) and returns
+// either { followup_text } to send back to Claude as the next user turn, or null to skip.
+const ACTION_HANDLERS = {
+  // Capture a photo via the device camera. Tags from Claude pre-populate shot_type + representative.
+  take_photo: async (action) => {
+    const tags = action.tags || [];
+    return new Promise(resolve => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/*";
+      if (tags.includes("camera") || tags.includes("now")) input.capture = "environment";
+      input.onchange = async () => {
+        const files = [...(input.files || [])];
+        if (files.length === 0) { resolve(null); return; }
+        const added = [];
+        for (const f of files) added.push(await addPhotoFromFile(f, tags));
+        renderPhotos();
+        DBX.schedule();
+        const types = added.map(p => p.tags?.shot_type || "?").join(", ");
+        const rep = added.some(p => p.representative === true) ? " (marquée représentative)" : "";
+        resolve({ followup_text: `[Action: ${added.length} photo(s) ajoutée(s) — type: ${types}${rep}]` });
+      };
+      input.click();
+    });
+  },
+
+  // Ask the user to mark which existing photo is representative.
+  mark_typical: async (action) => {
+    if (photos.length === 0) return { followup_text: "[Aucune photo à marquer.]" };
+    const list = photos.map((p, i) => `${i+1}. ${p.name}${p.tags?.shot_type ? " ("+p.tags.shot_type+")" : ""}`).join("\n");
+    const ans = prompt(`Quelle photo est représentative du champ ?\n${list}\n\nEntrer son numéro (1-${photos.length}), ou rien pour annuler :`);
+    const idx = parseInt(ans, 10) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= photos.length) return null;
+    photos.forEach(p => { p.representative = null; });
+    photos[idx].representative = true;
+    renderPhotos();
+    DBX.schedule();
+    return { followup_text: `[Action: photo ${idx+1} (${photos[idx].name}) marquée représentative]` };
+  },
+
+  // Suggest re-taking a photo (camera opens, same as take_photo with "retake" tag).
+  retake_photo: async (action) => {
+    return ACTION_HANDLERS.take_photo({ ...action, tags: [...(action.tags || []), "camera", "now"] });
+  },
+
+  // Add a parcel — pure-UX hint (panning/zooming required). Sends a short follow-up to Claude.
+  add_parcel: async () => {
+    alert("Cliquez une parcelle supplémentaire sur la carte (zoom ≥ 12).");
+    return null;  // no follow-up; the next save/turn will reflect the new selection
+  },
+};
+
+function renderChat() {
+  const log = document.getElementById("chat-log");
+  const actEl = document.getElementById("chat-actions");
+  log.innerHTML = "";
+  for (const m of conversation) {
+    const div = document.createElement("div");
+    div.className = "chat-msg " + m.role;
+    div.textContent = m.role === "user" ? m.display || m.content : m.message || m.content;
+    log.appendChild(div);
+  }
+  if (chatBusy) {
+    const t = document.createElement("div");
+    t.className = "chat-typing";
+    t.textContent = "Claude réfléchit…";
+    log.appendChild(t);
+  }
+  log.scrollTop = log.scrollHeight;
+
+  // Actions for the last assistant turn
+  actEl.innerHTML = "";
+  const last = [...conversation].reverse().find(m => m.role === "assistant");
+  if (last?.next_actions && !chatBusy) {
+    for (const a of last.next_actions) {
+      const b = document.createElement("button");
+      b.className = "chat-action";
+      b.textContent = a.label;
+      b.onclick = async () => {
+        if (a.id === "free_text") { freeTextOpen = true; renderChat(); return; }
+        const handler = ACTION_HANDLERS[a.id];
+        if (handler) {
+          chatBusy = true; renderChat();
+          try {
+            const result = await handler(a);
+            chatBusy = false;
+            if (result?.followup_text) sendTurn({ kind: "text", text: result.followup_text });
+            else renderChat();
+          } catch (err) {
+            chatBusy = false;
+            renderChat();
+            console.error(err);
+          }
+          return;
+        }
+        // Default: pass the action id through as a chat turn.
+        sendTurn({ kind: "action", id: a.id, label: a.label });
+      };
+      actEl.appendChild(b);
+    }
+    // Always offer "Autre…" so the user can ask anything regardless of Claude's choices.
+    const other = document.createElement("button");
+    other.className = "chat-action";
+    other.style.opacity = "0.7";
+    other.textContent = "✏ Autre…";
+    other.onclick = () => { freeTextOpen = true; renderChat(); };
+    actEl.appendChild(other);
+  }
+  // Free-text input is hidden by default. Shown only when the user explicitly picks a
+  // "free_text" action (or clicks "Autre…") from Claude's suggestions.
+  document.getElementById("chat-input-row").style.display = freeTextOpen ? "flex" : "none";
+  if (freeTextOpen) document.getElementById("chat-text").focus();
+}
+let freeTextOpen = false;
+
+function resetChat() {
+  conversation = [];
+  analysisCombined = null;
+  userProfile = {
+    scores: { farmer: 0, agronomist: 0, investor: 0, consumer: 0, researcher: 0 },
+    primary_concerns: [], expertise_0_100: 0, inferred_from_turns: []
+  };
+  freeTextOpen = false;
+  renderChat();
+  updateAnalyzeAvailability();
+  DBX.setAnalysis(null);
+}
+
+async function sendTurn(userInput) {
   if (!WORKER_URL && !ANTHROPIC_API_KEY) {
-    aStatus.textContent = "Configure WORKER_URL (recommandé) ou ANTHROPIC_API_KEY dans index.html.";
+    aStatus.textContent = "Configure WORKER_URL ou ANTHROPIC_API_KEY.";
     return;
   }
-  if (photos.length === 0) return;
-  analyzeBtn.disabled = true;
-  aStatus.textContent = `Analyse de ${photos.length} photo(s)…`;
+  if (chatBusy) return;
+  const turnIndex = conversation.length / 2;
+  const isFirstTurn = conversation.length === 0;
 
-  const userText = `${buildContextBlock()}
+  // Build the user content (text + image first turn)
+  const userContent = [];
+  const userDisplay = !userInput
+    ? "Démarrer l'analyse"
+    : userInput.kind === "action" ? userInput.label
+    : userInput.text;
 
-Schéma JSON cible (chaque valeur décrit le type/format attendu) :
-${JSON.stringify(METRIC_SCHEMA, null, 2)}
+  if (isFirstTurn) {
+    // Turn 0: include images + full context
+    for (const p of photos) {
+      userContent.push({ type: "image", source: { type: "base64", media_type: p.mime, data: p.b64 } });
+    }
+    const bio = bioMode === "bio" ? "BIO strict" : bioMode === "conventional" ? "Conventionnel" : "Auto";
+    const photoAges = photos.map((p, i) => {
+      const age = p.takenAt ? Math.round((Date.now() - p.takenAt.getTime()) / 86400000) : null;
+      return `${i+1}. ${p.lat != null ? `📍 ${p.lat.toFixed(4)},${p.lon.toFixed(4)}` : "sans GPS"}${p.direction != null ? ` 🧭${Math.round(p.direction)}°` : ""}${age != null ? ` 🕒 ${age}j` : ""}`;
+    }).join("\n");
+    const ctx = `${buildContextBlock()}
 
-Consigne : analyse les ${photos.length} photo(s) ci-dessus et renvoie UNIQUEMENT le JSON rempli, conforme au schéma. Pas de markdown, pas de texte hors JSON.`;
+Photos disponibles (${photos.length}) :
+${photoAges || "(aucune)"}
 
-  // Photos first (vision quality is better when images precede the question), then context.
-  const content = [
-    ...photos.map(p => ({
-      type: "image",
-      source: { type: "base64", media_type: p.mime, data: p.b64 }
-    })),
-    { type: "text", text: userText }
-  ];
+Mode de conduite : ${bio}`;
+    userContent.push({ type: "text", text: ctx + "\n\nDémarrons. Identifie ce qu'on voit ou propose des actions selon le contexte." });
+  } else {
+    // Subsequent turn: just user text or action
+    const text = userInput.kind === "action"
+      ? `[Action choisie : ${userInput.id}] — ${userInput.label}`
+      : userInput.text;
+    userContent.push({ type: "text", text });
+  }
+
+  conversation.push({
+    role: "user",
+    content: isFirstTurn ? "(contexte initial + photos)" : (userInput.kind === "action" ? `[${userInput.id}]` : userInput.text),
+    display: userDisplay,
+    turn: turnIndex
+  });
+  chatBusy = true;
+  setButtonsDisabled(true);
+  renderChat();
+
+  // Anthropic messages: alternate user/assistant, no system inside messages
+  const apiMessages = conversation.map((m, i) => {
+    if (m.role === "user" && i === 0) return { role: "user", content: userContent };
+    if (m.role === "user") return { role: "user", content: [{ type: "text", text: m.content }] };
+    return { role: "assistant", content: [{ type: "text", text: m.raw || m.message || "" }] };
+  });
 
   const payload = JSON.stringify({
     model: ANTHROPIC_MODEL,
     max_tokens: 2000,
-    system: [
-      { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }
-    ],
-    messages: [{ role: "user", content }]
+    system: [{ type: "text", text: CHAT_SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
+    messages: apiMessages
   });
 
   const useWorker = !!WORKER_URL;
@@ -1452,15 +2158,130 @@ Consigne : analyse les ${photos.length} photo(s) ci-dessus et renvoie UNIQUEMENT
     const r = await fetch(url, { method: "POST", headers, body: payload });
     const j = await r.json();
     if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
-    const text = j.content?.[0]?.text || "";
-    document.getElementById("raw").textContent = text;
-    let parsed;
-    try { parsed = JSON.parse(text); }
-    catch {
-      const m = text.match(/\{[\s\S]*\}/);
-      if (m) parsed = JSON.parse(m[0]); else throw new Error("Réponse non-JSON");
+    const rawText = j.content?.[0]?.text || "";
+    document.getElementById("raw").textContent = rawText;
+    const parsed = robustParseJson(rawText);
+
+    if (parsed.profile_update) {
+      // Merge scores key-by-key (Claude only returns updated dimensions).
+      const newScores = parsed.profile_update.scores || {};
+      userProfile.scores = { ...userProfile.scores, ...newScores };
+      if (parsed.profile_update.primary_concerns) userProfile.primary_concerns = parsed.profile_update.primary_concerns;
+      if (parsed.profile_update.expertise_0_100 != null) userProfile.expertise_0_100 = parsed.profile_update.expertise_0_100;
+      userProfile.inferred_from_turns = [...(userProfile.inferred_from_turns || []), turnIndex];
     }
-    // Authoritative override from RPG aggregation when parcels are selected.
+    if (parsed.metrics_update) {
+      analysisCombined = { ...(analysisCombined || {}), ...parsed.metrics_update };
+      if (selectedParcels.size > 0) {
+        const { totalArea, byCrop } = aggregateParcels();
+        analysisCombined.parcels_summary = analysisCombined.parcels_summary || {};
+        analysisCombined.parcels_summary.count = selectedParcels.size;
+        analysisCombined.parcels_summary.total_area_ha = totalArea;
+        analysisCombined.parcels_summary.crops_breakdown = Object.entries(byCrop).map(([code, a]) => ({
+          code_cultu: code, area_ha: a.area, share_pct: totalArea > 0 ? (a.area / totalArea) * 100 : 0
+        }));
+      }
+      renderMetrics(analysisCombined);
+      if (analysisCombined.diseases) {
+        renderDiseases(analysisCombined.diseases, {
+          t_per_ha: analysisCombined.yield?.estimated_t_per_ha,
+          price_eur_per_kg: analysisCombined.market?.indicative_price_eur_per_kg,
+          total_area_ha: analysisCombined.parcels_summary?.total_area_ha
+        });
+      }
+      renderParcelHighlight();  // refresh emojis from new identification
+    }
+
+    conversation.push({
+      role: "assistant",
+      message: parsed.message || "(réponse vide)",
+      next_actions: parsed.next_actions || [],
+      raw: rawText,
+      turn: turnIndex
+    });
+
+    DBX.setAnalysis({
+      analysis: analysisCombined,
+      conversation,
+      user_profile: userProfile
+    });
+  } catch (e) {
+    conversation.push({
+      role: "system",
+      message: "Erreur : " + e.message,
+      content: "Erreur : " + e.message,
+      turn: turnIndex
+    });
+  } finally {
+    chatBusy = false;
+    setButtonsDisabled(false);
+    renderChat();
+    updateAnalyzeAvailability();
+  }
+}
+
+document.getElementById("chat-start").addEventListener("click", () => sendTurn(null));
+document.getElementById("chat-send").addEventListener("click", () => {
+  const inp = document.getElementById("chat-text");
+  const text = inp.value.trim();
+  if (!text) return;
+  inp.value = "";
+  freeTextOpen = false;  // collapse after submit; user can re-open via "Autre…"
+  sendTurn({ kind: "text", text });
+});
+document.getElementById("chat-text").addEventListener("keydown", e => {
+  if (e.key === "Enter") document.getElementById("chat-send").click();
+});
+document.getElementById("chat-reset").addEventListener("click", () => {
+  if (confirm("Recommencer la conversation ? L'historique sera perdu.")) resetChat();
+});
+
+// ============ Standalone full report (📊 Rapport) ============
+async function generateReport() {
+  if (!WORKER_URL && !ANTHROPIC_API_KEY) { aStatus.textContent = "Configure le worker/clé."; return; }
+  if (photos.length === 0 && selectedParcels.size === 0) return;
+  chatBusy = true;
+  setButtonsDisabled(true);
+  aStatus.textContent = "📊 Génération du rapport complet…";
+
+  const bioInstruction = bioMode === "bio"
+    ? `\nMode BIO STRICT : traitements AB uniquement. Rendements + prix bio.`
+    : bioMode === "conventional" ? `\nMode conventionnel.` : "";
+
+  const userText = `${buildContextBlock()}
+
+Schéma JSON cible :
+${JSON.stringify(FULL_REPORT_SCHEMA, null, 2)}
+
+Consigne : MODE RAPPORT COMPLET. Pour chaque photo (numérotée 1..N dans l'ordre fourni), retourne UN objet dans photo_tags avec son shot_type, plant_count_visible, maturity, health, qualité, et si elle semble représentative. Effectue ensuite cross_check : compare les photos overview vs single_plant. Si discrepancy détectée (ex: overview sain mais single_plant malade), liste-la dans cross_check.discrepancies — c'est crucial pour décider si re-photographier.${bioInstruction}
+
+Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
+
+  const content = [];
+  for (const p of photos) content.push({ type: "image", source: { type: "base64", media_type: p.mime, data: p.b64 } });
+  content.push({ type: "text", text: userText });
+
+  const payload = JSON.stringify({
+    model: ANTHROPIC_MODEL,
+    max_tokens: 8000,
+    system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
+    messages: [{ role: "user", content }]
+  });
+  const useWorker = !!WORKER_URL;
+  const url = useWorker ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze` : "https://api.anthropic.com/v1/messages";
+  const headers = useWorker
+    ? { "content-type": "application/json", "anthropic-version": "2023-06-01" }
+    : { "content-type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" };
+
+  try {
+    const r = await fetch(url, { method: "POST", headers, body: payload });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+    const rawText = j.content?.[0]?.text || "";
+    document.getElementById("raw").textContent = rawText;
+    const parsed = robustParseJson(rawText);
+
+    // Authoritative RPG override
     if (selectedParcels.size > 0) {
       const { totalArea, byCrop } = aggregateParcels();
       parsed.parcels_summary = parsed.parcels_summary || {};
@@ -1472,31 +2293,95 @@ Consigne : analyse les ${photos.length} photo(s) ci-dessus et renvoie UNIQUEMENT
       if (parsed.yield?.estimated_t_per_ha && totalArea > 0) {
         parsed.yield.estimated_total_t = parsed.yield.estimated_t_per_ha * totalArea;
         if (parsed.market?.indicative_price_eur_per_kg) {
-          parsed.market.estimated_total_value_eur =
-            parsed.yield.estimated_total_t * 1000 * parsed.market.indicative_price_eur_per_kg;
+          parsed.market.estimated_total_value_eur = parsed.yield.estimated_total_t * 1000 * parsed.market.indicative_price_eur_per_kg;
         }
       }
     }
-    renderMetrics(parsed);
-    renderDiseases(parsed.diseases, {
-      t_per_ha: parsed.yield?.estimated_t_per_ha,
-      price_eur_per_kg: parsed.market?.indicative_price_eur_per_kg,
-      total_area_ha: parsed.parcels_summary?.total_area_ha
-    });
-    lastAnalyzedFingerprint = inputFingerprint();
-    aStatus.textContent = "OK — analyse à jour.";
-    updateAnalyzeAvailability();
+    analysisCombined = { ...(analysisCombined || {}), ...parsed };
+
+    // Merge per-photo tags into the photo objects
+    if (Array.isArray(parsed.photo_tags)) {
+      for (const tag of parsed.photo_tags) {
+        const photo = photos[tag.photo_index - 1];
+        if (photo) {
+          photo.tags = { ...(photo.tags || {}), ...tag, analyzed_at: new Date().toISOString() };
+        }
+      }
+      renderPhotos();
+    }
+
+    renderMetrics(analysisCombined);
+    if (analysisCombined.diseases) {
+      renderDiseases(analysisCombined.diseases, {
+        t_per_ha: analysisCombined.yield?.estimated_t_per_ha,
+        price_eur_per_kg: analysisCombined.market?.indicative_price_eur_per_kg,
+        total_area_ha: analysisCombined.parcels_summary?.total_area_ha
+      });
+    }
+    renderCrossCheck(analysisCombined.cross_check);
+    renderParcelHighlight();  // refresh emojis from new identification
+    DBX.setAnalysis({ analysis: analysisCombined, conversation, user_profile: userProfile });
+    aStatus.textContent = "✓ Rapport complet généré.";
   } catch (e) {
     aStatus.textContent = "Erreur : " + e.message;
   } finally {
-    analyzeBtn.disabled = false;
+    chatBusy = false;
+    setButtonsDisabled(false);
+    updateAnalyzeAvailability();
   }
 }
-analyzeBtn.addEventListener("click", analyze);
 
-// PWA: register service worker (only works over http(s) or localhost; silently noops on file://).
-if ("serviceWorker" in navigator && location.protocol !== "file:") {
-  navigator.serviceWorker.register("./sw.js").catch(e => console.warn("SW reg failed:", e));
+function renderCrossCheck(cc) {
+  let host = document.getElementById("cross-check");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "cross-check";
+    document.getElementById("metrics").after(host);
+  }
+  if (!cc || (!cc.discrepancies?.length && cc.consistent_0_1 == null)) {
+    host.innerHTML = "";
+    return;
+  }
+  const score = cc.consistent_0_1 != null ? Math.round(cc.consistent_0_1 * 100) : null;
+  const tone = score == null ? "" : score >= 70 ? "var(--accent)" : score >= 40 ? "var(--warn)" : "var(--bad)";
+  host.innerHTML = `
+    <div class="cell full" style="border-left:3px solid ${tone || "var(--border)"}">
+      <div class="k">Cohérence inter-photos</div>
+      <div class="v">${score != null ? score + " %" : "—"}</div>
+      ${cc.discrepancies?.length ? `<ul style="margin:6px 0 0 16px;padding:0;font-size:11px">${cc.discrepancies.map(d => `<li>${d}</li>`).join("")}</ul>` : ""}
+    </div>`;
+}
+
+document.getElementById("report-btn").addEventListener("click", generateReport);
+
+// Initial chat render so the empty state shows.
+renderChat();
+
+// Drawer toggle (mobile only — handle is display:none on desktop).
+document.getElementById("drawer-handle").addEventListener("click", () => {
+  const side = document.getElementById("side");
+  side.classList.toggle("open");
+  document.getElementById("drawer-chevron").textContent = side.classList.contains("open") ? "▼" : "▲";
+});
+
+// Build/instance tag — random hex generated at page-load. If you ever see the same value
+// after a hard reload, the page is being served from cache (browser or SW).
+document.getElementById("ver").textContent =
+  [...crypto.getRandomValues(new Uint8Array(4))].map(b => b.toString(16).padStart(2, "0")).join("");
+
+// PWA: register service worker, but NEVER on localhost (stale-cache hell during dev).
+// Also: if a SW was previously registered on this origin, unregister it.
+const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/.test(location.hostname);
+if ("serviceWorker" in navigator) {
+  if (isLocalhost) {
+    navigator.serviceWorker.getRegistrations().then(regs => {
+      regs.forEach(r => r.unregister().then(() => console.log("[dev] unregistered stale SW")));
+    });
+    // Also clear all caches it may have populated.
+    if (window.caches) caches.keys().then(keys => keys.forEach(k => caches.delete(k)));
+  } else if (location.protocol !== "file:") {
+    navigator.serviceWorker.register("./sw.js").catch(e => console.warn("SW reg failed:", e));
+  }
 }
 
 // Dialect dropdown: persist, re-evaluate Analyser availability on change.
@@ -1524,8 +2409,32 @@ const DBX = (() => {
     sessionId: localStorage.getItem(LS.session) || null,
     cropCode: localStorage.getItem(LS.crop) || null,  // path prefix /crops/<cropCode>/cultures/<id>
     uploaded: JSON.parse(localStorage.getItem(LS.uploaded) || "{}"),
-    lastAnalysis: null
+    lastAnalysis: null,
+    lastConversation: [],
+    lastUserProfile: null,
+    // If we have a token at startup, an auto-reload is imminent. Block any save until it finishes.
+    suspendSave: !!localStorage.getItem(LS.token),
+    saveStatus: "idle"  // idle | dirty | saving | saved | loading | error
   };
+  const SAVE_BADGES = {
+    idle:    { txt: "—",                   color: "var(--muted)" },
+    dirty:   { txt: "● Modifié",            color: "var(--warn)" },
+    saving:  { txt: "↑ Sauvegarde…",        color: "var(--accent)" },
+    saved:   { txt: "✓ Sauvegardé",         color: "var(--accent)" },
+    loading: { txt: "↓ Chargement…",        color: "var(--accent)" },
+    error:   { txt: "⚠ Erreur",             color: "var(--bad)" }
+  };
+  function setSaveStatus(s) {
+    state.saveStatus = s;
+    const el = document.getElementById("dbx-status-badge");
+    if (el) {
+      const b = SAVE_BADGES[s] || SAVE_BADGES.idle;
+      el.textContent = b.txt;
+      el.style.color = b.color;
+    }
+    const saveBtn = document.getElementById("dbx-save");
+    if (saveBtn) saveBtn.disabled = (s === "saved" || s === "saving" || s === "loading");
+  }
 
   // Dominant crop = largest area in current selection, else "UNK".
   function dominantCropFromSelection() {
@@ -1691,6 +2600,8 @@ const DBX = (() => {
 
   async function saveNow() {
     if (!state.enabled || !state.token) return;
+    if (state.suspendSave) return;  // load in progress — don't save half-rehydrated state
+    setSaveStatus("saving");
     ensureSession();
     const base = basePath();
 
@@ -1703,6 +2614,7 @@ const DBX = (() => {
         state.uploaded[p.id] = { name: p.name, mime: p.mime };
         persistUploaded();
       } catch (e) {
+        setSaveStatus("error");
         renderPanel(`Erreur photo : ${e.message}`);
         return;
       }
@@ -1719,6 +2631,7 @@ const DBX = (() => {
       schema: 2,
       culture_id: state.sessionId,
       crop_code: state.cropCode,
+      bio_mode: bioMode,
       saved_at: new Date().toISOString(),
       address: currentAddress,
       parcels: [...selectedParcels.values()].map(p => ({
@@ -1732,20 +2645,27 @@ const DBX = (() => {
         lat: p.lat, lon: p.lon, locSource: p.locSource,
         direction: p.direction,
         takenAt: p.takenAt ? p.takenAt.toISOString() : null,
+        representative: p.representative ?? null,
+        tags: p.tags || null,
         file: `photos/${p.id}.${(p.mime || "image/jpeg").split("/")[1] || "jpg"}`
       })),
-      analysis: state.lastAnalysis
+      analysis: state.lastAnalysis,
+      conversation: state.lastConversation || [],
+      user_profile: state.lastUserProfile || null
     };
     try {
       await uploadFile(`${base}/culture.json`, new TextEncoder().encode(JSON.stringify(manifest, null, 2)));
-      renderPanel(`✓ Sauvegardé ${new Date().toLocaleTimeString("fr-FR")} (${manifest.parcels.length} parc., ${manifest.photos.length} ph.)`);
+      setSaveStatus("saved");
+      renderPanel(`✓ ${new Date().toLocaleTimeString("fr-FR")} · ${manifest.parcels.length} parc. · ${manifest.photos.length} ph.`);
     } catch (e) {
-      renderPanel(`Erreur manifeste : ${e.message}`);
+      setSaveStatus("error");
+      renderPanel(`Erreur : ${e.message}`);
     }
   }
 
   function schedule() {
     if (!state.enabled || !state.token || state.suspendSave) return;
+    if (state.saveStatus !== "saving" && state.saveStatus !== "loading") setSaveStatus("dirty");
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       saveInFlight = saveNow().catch(e => console.error(e)).finally(() => { saveInFlight = null; });
@@ -1782,8 +2702,60 @@ const DBX = (() => {
     return r;
   }
 
+  async function deleteFolder(path) {
+    const r = await dbxFetch("https://api.dropboxapi.com/2/files/delete_v2", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path })
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error(`delete ${path}: ${r.status} ${t.slice(0, 150)}`);
+    }
+  }
+
+  async function deleteSession(cropCode, sid) {
+    await deleteFolder(`/crops/${cropCode}/cultures/${sid}`);
+    // If we just deleted the active culture, clear local pointers.
+    if (state.cropCode === cropCode && state.sessionId === sid) {
+      state.sessionId = null;
+      state.cropCode = null;
+      state.uploaded = {};
+      localStorage.removeItem(LS.session);
+      localStorage.removeItem(LS.crop);
+      localStorage.setItem(LS.uploaded, "{}");
+      // Clear in-memory state too.
+      photos.forEach(p => { if (p.marker) map.removeLayer(p.marker); if (p.fovLayer) map.removeLayer(p.fovLayer); });
+      photos.length = 0;
+      selectedParcels.clear();
+      renderParcelHighlight();
+      renderParcelInfoPanel();
+      renderPhotos();
+      updateLockHint();
+      updateAnalyzeAvailability();
+    }
+  }
+
+  function showLoading(msg, fraction) {
+    const ov = document.getElementById("loading-overlay");
+    document.getElementById("loading-msg").textContent = msg || "Chargement…";
+    const bar = document.getElementById("loading-bar");
+    if (fraction != null) {
+      bar.classList.add("show");
+      document.getElementById("loading-bar-fill").style.width = Math.round(Math.max(0, Math.min(1, fraction)) * 100) + "%";
+    } else {
+      bar.classList.remove("show");
+    }
+    ov.classList.add("show");
+  }
+  function hideLoading() {
+    document.getElementById("loading-overlay").classList.remove("show");
+  }
+
   async function loadSession(cropCode, sid) {
     state.suspendSave = true;
+    setSaveStatus("loading");
+    showLoading(`Chargement du manifeste…`, 0);
     try {
       const r = await downloadFile(`/crops/${cropCode}/cultures/${sid}/culture.json`);
       const manifest = await r.json();
@@ -1794,6 +2766,11 @@ const DBX = (() => {
       selectedParcels.clear();
       renderParcelHighlight();
 
+      // BIO mode
+      if (manifest.bio_mode) {
+        bioMode = manifest.bio_mode;
+        localStorage.setItem("agri_bio_mode", bioMode);
+      }
       // Address
       if (manifest.address) {
         currentAddress = manifest.address;
@@ -1812,7 +2789,10 @@ const DBX = (() => {
       updateLockHint();
 
       // Photos: download each blob and rehydrate
+      const total = (manifest.photos || []).length;
+      let done = 0;
       for (const meta of (manifest.photos || [])) {
+        showLoading(`Téléchargement photo ${done + 1}/${total}…`, total > 0 ? done / total : null);
         try {
           const pr = await downloadFile(`/crops/${cropCode}/cultures/${sid}${meta.file.startsWith("/") ? meta.file : "/" + meta.file}`);
           const blob = await pr.blob();
@@ -1826,6 +2806,8 @@ const DBX = (() => {
             lat: meta.lat, lon: meta.lon, locSource: meta.locSource,
             direction: meta.direction,
             takenAt: meta.takenAt ? new Date(meta.takenAt) : null,
+            representative: meta.representative ?? null,
+            tags: meta.tags || null,
             exifFound: true, recompressed: false,
             marker: null, fovLayer: null
           };
@@ -1836,21 +2818,37 @@ const DBX = (() => {
         } catch (e) {
           console.warn("photo reload failed", meta.file, e);
         }
+        done++;
       }
+      showLoading(`Finalisation…`, 1);
       persistUploaded();
       renderPhotos();
 
       // Analysis
       if (manifest.analysis) {
-        renderMetrics(manifest.analysis);
-        renderDiseases(manifest.analysis.diseases, {
-          t_per_ha: manifest.analysis.yield?.estimated_t_per_ha,
-          price_eur_per_kg: manifest.analysis.market?.indicative_price_eur_per_kg,
-          total_area_ha: manifest.analysis.parcels_summary?.total_area_ha
-        });
-        state.lastAnalysis = manifest.analysis;
+        analysisCombined = manifest.analysis;
+        renderParcelHighlight();  // emojis follow the identification
+        renderMetrics(analysisCombined);
+        if (analysisCombined.diseases) {
+          renderDiseases(analysisCombined.diseases, {
+            t_per_ha: analysisCombined.yield?.estimated_t_per_ha,
+            price_eur_per_kg: analysisCombined.market?.indicative_price_eur_per_kg,
+            total_area_ha: analysisCombined.parcels_summary?.total_area_ha
+          });
+        }
+        state.lastAnalysis = analysisCombined;
         lastAnalyzedFingerprint = inputFingerprint();
       }
+      // Restore conversation + user profile
+      if (Array.isArray(manifest.conversation)) {
+        conversation = manifest.conversation;
+        state.lastConversation = manifest.conversation;
+      }
+      if (manifest.user_profile) {
+        userProfile = manifest.user_profile;
+        state.lastUserProfile = manifest.user_profile;
+      }
+      renderChat();
 
       // Adopt the loaded culture as current
       state.sessionId = sid;
@@ -1864,13 +2862,81 @@ const DBX = (() => {
       else if (currentAddress?.lat) map.setView([currentAddress.lat, currentAddress.lon], 15);
       const cm = cropMeta(cropCode);
       renderPanel(`Culture ${cm.emoji || ""} ${cm.fr || cropCode} — ${sid} rechargée.`);
+      setSaveStatus("saved");
+    } catch (e) {
+      setSaveStatus("error");
+      throw e;
     } finally {
-      state.suspendSave = false;
+      // Keep suspendSave true long enough for the MutationObservers triggered by
+      // renderPhotos / renderParcelInfoPanel to fire and be debounced. Otherwise
+      // load → render → observer → schedule() → spurious save of unchanged data.
+      setTimeout(() => { state.suspendSave = false; }, 3000);
+      hideLoading();
     }
   }
 
-  function setAnalysis(parsed) {
-    state.lastAnalysis = parsed;
+  // ===== Auto-reload latest culture on startup =====
+  // Two strategies: (1) if localStorage already remembers sessionId + cropCode,
+  // load that directly. (2) otherwise, list cultures and load the most recent one.
+  async function autoReloadLatest() {
+    console.log("[dbx] autoReload: enabled=", state.enabled, "token=", !!state.token,
+                "sessionId=", state.sessionId, "cropCode=", state.cropCode);
+    if (!state.enabled) { state.suspendSave = false; pendingDbxLoad = false; window.__hideLoading?.(); return; }
+    if (!state.token) {
+      state.suspendSave = false;
+      pendingDbxLoad = false;
+      window.__setLoadingMsg?.("Configurez un crop");
+      setTimeout(() => window.__hideLoading?.(), 1200);
+      renderPanel("Non connecté — connectez Dropbox pour sauvegarder.");
+      setTimeout(refreshChips, 300);  // fallback chip refresh for the default view
+      return;
+    }
+    window.__setLoadingMsg?.("Chargement de votre crop…");
+    try {
+      if (state.sessionId && state.cropCode) {
+        console.log("[dbx] direct reload", state.cropCode, state.sessionId);
+        await loadSession(state.cropCode, state.sessionId);
+        return;
+      }
+      showLoading("Recherche de la dernière culture…", 0);
+      const list = await listSessions();
+      console.log("[dbx] listSessions →", list.length, "cultures");
+      if (list.length > 0) {
+        const latest = list[0];
+        await loadSession(latest.crop, latest.id);
+      } else {
+        hideLoading();
+        state.suspendSave = false;
+        window.__setLoadingMsg?.("Configurez un crop");
+        setTimeout(() => window.__hideLoading?.(), 1200);
+        renderPanel("Aucun crop sauvegardé — créez-en un.");
+        setTimeout(refreshChips, 300);
+      }
+    } catch (e) {
+      console.warn("[dbx] auto-reload failed:", e);
+      hideLoading();
+      state.suspendSave = false;
+      renderPanel(`Auto-reload échoué : ${e.message}`);
+      setTimeout(refreshChips, 300);
+    } finally {
+      // Always release the gate so subsequent user actions (move/click) behave normally.
+      pendingDbxLoad = false;
+    }
+  }
+  // Fire after the rest of the script has set up event listeners + the map is ready.
+  // Using window.load ensures all init code has run; setTimeout fires if load already happened.
+  if (document.readyState === "complete") setTimeout(autoReloadLatest, 200);
+  else window.addEventListener("load", () => setTimeout(autoReloadLatest, 200));
+
+  function setAnalysis(payload) {
+    // Accept either flat metrics or { analysis, conversation, user_profile } envelope.
+    if (payload && typeof payload === "object" && ("conversation" in payload || "user_profile" in payload)) {
+      state.lastAnalysis = payload.analysis || null;
+      state.lastConversation = payload.conversation || [];
+      state.lastUserProfile = payload.user_profile || null;
+    } else {
+      state.lastAnalysis = payload;
+    }
     schedule();
   }
 
@@ -1909,11 +2975,14 @@ const DBX = (() => {
       return;
     }
     const cm = state.cropCode ? cropMeta(state.cropCode) : null;
-    const cultureLabel = state.sessionId
+    const cropLabel = state.sessionId
       ? `${cm ? cm.emoji + " " + cm.fr + " · " : ""}<code>${state.sessionId}</code>`
-      : "(aucune culture active)";
+      : "(aucun crop actif)";
     panel.innerHTML = `
-      <div>✓ Connecté · ${cultureLabel}</div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+        <div style="flex:1">✓ Connecté · ${cropLabel}</div>
+        <div id="dbx-status-badge" style="font-size:11px;font-weight:700;white-space:nowrap"></div>
+      </div>
       <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
         <button class="secondary" id="dbx-new"  style="font-size:11px;padding:4px 8px">Nouvelle</button>
         <button class="secondary" id="dbx-save" style="font-size:11px;padding:4px 8px">Sauver</button>
@@ -1923,47 +2992,71 @@ const DBX = (() => {
       <div id="dbx-sessions" style="margin-top:6px"></div>
       <div class="small" style="margin-top:6px">${extra || ""}</div>
     `;
-    document.getElementById("dbx-new").onclick = () => { resetSession(); renderPanel("Nouvelle culture prête."); };
+    // Re-apply current status to refresh the badge + button disabled state.
+    setSaveStatus(state.saveStatus);
+    document.getElementById("dbx-new").onclick = () => { resetSession(); renderPanel("Nouveau crop prêt."); };
     document.getElementById("dbx-save").onclick = () => saveNow();
     document.getElementById("dbx-disc").onclick = () => { disconnect(); renderPanel(); };
-    document.getElementById("dbx-load").onclick = async () => {
-      const target = document.getElementById("dbx-sessions");
-      target.innerHTML = `<div class="small">Recherche…</div>`;
-      try {
-        const list = await listSessions();
-        if (list.length === 0) { target.innerHTML = `<div class="small">Aucune culture sauvegardée.</div>`; return; }
-        // Group by crop, ordered by latest culture in each group.
-        const byCrop = {};
-        for (const c of list) (byCrop[c.crop] ||= []).push(c);
-        const cropOrder = Object.entries(byCrop)
-          .map(([cc, items]) => [cc, items.sort((a, b) => b.id.localeCompare(a.id))[0].id])
-          .sort((a, b) => b[1].localeCompare(a[1]))
-          .map(([cc]) => cc);
-        const optgroups = cropOrder.map(cc => {
-          const cm = cropMeta(cc);
-          const opts = byCrop[cc].map(c => `<option value="${cc}|${c.id}">${c.id}</option>`).join("");
-          return `<optgroup label="${cm.emoji || ""} ${cm.fr || cc}">${opts}</optgroup>`;
-        }).join("");
-        target.innerHTML = `
-          <select id="dbx-sess-select" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--border);background:var(--panel2);color:var(--text);font-size:11px">
-            ${optgroups}
-          </select>
-          <button class="secondary" id="dbx-sess-go" style="font-size:11px;padding:4px 8px;margin-top:4px">Charger</button>
-        `;
-        document.getElementById("dbx-sess-go").onclick = async () => {
-          const [cc, sid] = document.getElementById("dbx-sess-select").value.split("|");
-          target.innerHTML = `<div class="small">Chargement…</div>`;
-          try { await loadSession(cc, sid); }
-          catch (e) { target.innerHTML = `<div class="small">Erreur : ${e.message}</div>`; }
-        };
-      } catch (e) {
-        target.innerHTML = `<div class="small">Erreur : ${e.message}</div>`;
+    document.getElementById("dbx-load").onclick = () => renderCropsList();
+  }
+
+  // List of crops with switch action. Delete is intentionally NOT exposed in the UI
+  // for now — too easy to misclick. Restore with ?debug if needed.
+  const showDelete = new URLSearchParams(location.search).has("debug");
+
+  async function renderCropsList() {
+    const target = document.getElementById("dbx-sessions");
+    target.innerHTML = `<div class="small">Recherche…</div>`;
+    try {
+      const list = await listSessions();
+      if (list.length === 0) {
+        target.innerHTML = `<div class="small">Aucun crop sauvegardé.</div>`;
+        return;
       }
-    };
+      const byCrop = {};
+      for (const c of list) (byCrop[c.crop] ||= []).push(c);
+      const cropOrder = Object.entries(byCrop)
+        .map(([cc, items]) => [cc, items.sort((a, b) => b.id.localeCompare(a.id))[0].id])
+        .sort((a, b) => b[1].localeCompare(a[1]))
+        .map(([cc]) => cc);
+      let html = "";
+      for (const cc of cropOrder) {
+        const cm = cropMeta(cc);
+        html += `<div style="margin-top:6px;font-weight:600;font-size:11px;color:var(--muted)">${cm.emoji || "🌱"} ${cm.fr || cc}</div>`;
+        for (const c of byCrop[cc]) {
+          const isCurrent = state.cropCode === cc && state.sessionId === c.id;
+          html += `
+            <div style="display:flex;gap:4px;margin-top:2px;align-items:center;padding:3px 6px;border-radius:4px;background:${isCurrent ? "var(--accent)" : "var(--panel2)"};color:${isCurrent ? "#0a0e13" : "var(--text)"}">
+              <button class="dbx-sess-switch" data-crop="${cc}" data-id="${c.id}"
+                style="flex:1;font-size:10px;padding:2px 4px;text-align:left;background:transparent;color:inherit;border:none;cursor:pointer">
+                ${isCurrent ? "● " : ""}<code style="font-size:10px;color:inherit">${c.id}</code>
+              </button>
+              ${showDelete ? `<button class="dbx-sess-del" data-crop="${cc}" data-id="${c.id}" title="Supprimer ce crop"
+                style="font-size:11px;padding:2px 6px;background:var(--bad);color:#fff;border:none;border-radius:3px;cursor:pointer">×</button>` : ""}
+            </div>`;
+        }
+      }
+      target.innerHTML = html;
+
+      target.querySelectorAll(".dbx-sess-switch").forEach(b => b.onclick = async () => {
+        const cc = b.dataset.crop, sid = b.dataset.id;
+        target.innerHTML = `<div class="small">Chargement…</div>`;
+        try { await loadSession(cc, sid); renderCropsList(); }
+        catch (e) { target.innerHTML = `<div class="small">Erreur : ${e.message}</div>`; }
+      });
+      target.querySelectorAll(".dbx-sess-del").forEach(b => b.onclick = async () => {
+        const cc = b.dataset.crop, sid = b.dataset.id;
+        if (!confirm(`Supprimer définitivement le crop ${cropMeta(cc).fr || cc} / ${sid} ?`)) return;
+        try { await deleteSession(cc, sid); renderCropsList(); renderPanel(); }
+        catch (e) { alert("Erreur : " + e.message); }
+      });
+    } catch (e) {
+      target.innerHTML = `<div class="small">Erreur : ${e.message}</div>`;
+    }
   }
   renderPanel();
 
-  return { schedule, setAnalysis };
+  return { schedule, setAnalysis, autoReloadLatest, listSessions };
 })();
 
 // ===== Wire save triggers on every data change =====
@@ -1979,18 +3072,56 @@ function onInputsChanged() { dbxOnChange(); updateAnalyzeAvailability(); }
 new MutationObserver(onInputsChanged).observe(document.getElementById("thumbs"), { childList: true, subtree: true });
 new MutationObserver(onInputsChanged).observe(document.getElementById("parcel-info"), { childList: true, subtree: true });
 
-// After analysis succeeds, surface the parsed result to DBX so it's part of the next save.
-const _origAnalyze = analyze;
-window.analyze = analyze = async function () {
-  await _origAnalyze();
-  // The last parsed analysis JSON is rendered into #raw; pick it up.
-  try {
-    const txt = document.getElementById("raw").textContent;
-    if (txt) DBX.setAnalysis(JSON.parse(txt));
-  } catch {}
-};
-analyzeBtn.removeEventListener?.("click", _origAnalyze);
-analyzeBtn.addEventListener("click", analyze);
+// Analysis → Dropbox save is now wired directly inside analyze() via DBX.setAnalysis.
+
+// ============ Debug panel (only with ?debug in URL) ============
+if (new URLSearchParams(location.search).has("debug")) {
+  const panel = document.getElementById("debug-panel");
+  panel.style.display = "block";
+  const out = document.getElementById("dbg-output");
+  const show = txt => { out.textContent = txt; };
+
+  document.getElementById("dbg-dump").onclick = () => {
+    const dump = {};
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      dump[k] = localStorage.getItem(k);
+    }
+    show(JSON.stringify(dump, null, 2));
+    navigator.clipboard?.writeText(JSON.stringify(dump, null, 2));
+  };
+
+  document.getElementById("dbg-token").onclick = () => {
+    const t = localStorage.getItem("dbx_token");
+    if (!t) { show("(pas de dbx_token en localStorage)"); return; }
+    navigator.clipboard?.writeText(t);
+    show(`dbx_token copié dans le presse-papier (${t.length} chars, prefix: ${t.slice(0, 12)}…)`);
+  };
+
+  document.getElementById("dbg-reload").onclick = async () => {
+    show("Lancement autoReloadLatest…");
+    try {
+      await DBX.autoReloadLatest();
+      show("Auto-reload terminé. Voir console pour les logs.");
+    } catch (e) {
+      show(`Erreur : ${e.message}`);
+    }
+  };
+
+  document.getElementById("dbg-sw").onclick = async () => {
+    const regs = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistrations() : [];
+    for (const r of regs) await r.unregister();
+    const keys = window.caches ? await caches.keys() : [];
+    for (const k of keys) await caches.delete(k);
+    show(`Purgés : ${regs.length} SW · ${keys.length} caches. Rechargez la page (Cmd+Shift+R).`);
+  };
+
+  document.getElementById("dbg-clear").onclick = () => {
+    if (!confirm("Vider TOUT localStorage (token, session, préférences) ?")) return;
+    localStorage.clear();
+    show("localStorage vidé. Rechargez.");
+  };
+}
 </script>
 </body>
 </html>

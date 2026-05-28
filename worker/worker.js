@@ -19,6 +19,7 @@ const corsHeaders = (origin) => ({
   "access-control-allow-origin": origin || "*",
   "access-control-allow-methods": "POST, OPTIONS",
   "access-control-allow-headers": ALLOWED_HEADERS,
+  "access-control-expose-headers": "request-id,retry-after,anthropic-ratelimit-requests-limit,anthropic-ratelimit-requests-remaining,anthropic-ratelimit-requests-reset,anthropic-ratelimit-input-tokens-limit,anthropic-ratelimit-input-tokens-remaining,anthropic-ratelimit-input-tokens-reset,anthropic-ratelimit-output-tokens-limit,anthropic-ratelimit-output-tokens-remaining,anthropic-ratelimit-output-tokens-reset,anthropic-ratelimit-tokens-limit,anthropic-ratelimit-tokens-remaining,anthropic-ratelimit-tokens-reset",
   "access-control-max-age": "86400",
   "vary": "Origin"
 });
@@ -68,13 +69,23 @@ export default {
       method: "POST", headers: upstreamHeaders, body
     });
 
-    // Stream the upstream response back with CORS.
+    // Stream the upstream response back with CORS + relevant Anthropic headers
+    // (rate-limit, request-id) for client-side debugging in DevTools.
+    const passThrough = {};
+    for (const h of [
+      "content-type", "request-id", "anthropic-organization-id",
+      "anthropic-ratelimit-requests-limit", "anthropic-ratelimit-requests-remaining", "anthropic-ratelimit-requests-reset",
+      "anthropic-ratelimit-input-tokens-limit", "anthropic-ratelimit-input-tokens-remaining", "anthropic-ratelimit-input-tokens-reset",
+      "anthropic-ratelimit-output-tokens-limit", "anthropic-ratelimit-output-tokens-remaining", "anthropic-ratelimit-output-tokens-reset",
+      "anthropic-ratelimit-tokens-limit", "anthropic-ratelimit-tokens-remaining", "anthropic-ratelimit-tokens-reset",
+      "retry-after"
+    ]) {
+      const v = upstream.headers.get(h);
+      if (v) passThrough[h] = v;
+    }
     return new Response(upstream.body, {
       status: upstream.status,
-      headers: {
-        "content-type": upstream.headers.get("content-type") || "application/json",
-        ...corsHeaders(origin)
-      }
+      headers: { ...passThrough, ...corsHeaders(origin) }
     });
   }
 };

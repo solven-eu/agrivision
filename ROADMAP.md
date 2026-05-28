@@ -63,6 +63,29 @@ public/
 
 **Bonus once split:** can introduce TypeScript per-file later if desired, or unit-test individual modules with Playwright component tests.
 
+## Mobile-first UX redesign
+
+AgriVision is meant to be used **in the field**. The current layout is desktop-first (380 px fixed sidebar + map). A first-pass responsive layout converts the sidebar to a bottom drawer on ≤768 px screens, but a real mobile redesign requires more.
+
+**Pain points on phones today:**
+- Photo upload UX assumes file picker on macOS; needs to default to camera capture (`<input type="file" accept="image/*" capture="environment">`).
+- Direction setting is fiddly with finger taps — could read compass live via `DeviceOrientation` API.
+- Geolocation flow assumes browser prompt; on iOS, must be triggered by a user action.
+- The sun-compass + lock badge + select hint clutter the small map.
+- Parcel-click hit area is tiny on touch.
+- Dropbox manual-paste OAuth flow is painful on phone (juggling tabs).
+
+**Direction:**
+- Camera-first photo workflow: large round "📷 Capturer" button, photo opens directly in editing sheet (set location, direction, takenAt fallback).
+- Live compass: when in "aim direction" mode, the FOV cone follows the device's actual heading.
+- Drawer with snap points: peek (60 px) / half (45 vh) / full (95 vh).
+- Map-level FAB (floating action button) for the primary action: when no crop, "✚ Nouveau crop"; when crop active, "📷 Photo".
+- Inline OAuth: try `display: page` (Dropbox supports it) and a dedicated `/oauth-redirect` page to capture the code automatically.
+
+**Out of scope (separate ROADMAP items):**
+- Offline mode (already a PWA, needs offline tile cache + queued writes).
+- Native wrapper (Capacitor / Tauri) for app-store distribution.
+
 ## Map rotation to fit elongated parcels
 
 When parcels are locked and auto-fit, the map currently keeps north up. For elongated parcels (e.g. canne à sucre strips on La Réunion, vine rows in Gironde) this wastes ~30–40% of screen real estate.
