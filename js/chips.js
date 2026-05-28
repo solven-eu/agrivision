@@ -17,7 +17,19 @@ export function installChips(app) {
   let chipsExcluded = new Set();
   const chipsEl = document.getElementById("chips");
 
-  function buildRpgLayer() {
+  // The CQL_FILTER string currently applied to rpgLayer. Used to dedupe rebuilds.
+  let currentCqlFilter = null;
+
+  // Compute the CQL_FILTER from current state. Returns "" when no filter is needed.
+  function currentFilter() {
+    if (viewportCultus.size === 0) return "";
+    if (chipsExcluded.size === 0) return ""; // show all
+    if (selectedGroups.size === 0) return `code_cultu IN ('__none__')`; // hide all
+    const codes = [...selectedGroups].map((c) => `'${c}'`).join(",");
+    return `code_cultu IN (${codes})`;
+  }
+
+  function buildRpgLayer(cqlFilter) {
     const opts = {
       layers: RPG_LAYER,
       format: "image/png",
@@ -26,26 +38,22 @@ export function installChips(app) {
       attribution: "RPG © IGN",
       opacity: 0.65,
     };
-    if (viewportCultus.size > 0) {
-      if (chipsExcluded.size === 0) {
-        // no exclusion → no filter (show all)
-      } else if (selectedGroups.size === 0) {
-        opts.CQL_FILTER = `code_cultu IN ('__none__')`; // hide all
-      } else {
-        const codes = [...selectedGroups].map((c) => `'${c}'`).join(",");
-        opts.CQL_FILTER = `code_cultu IN (${codes})`;
-      }
-    }
+    if (cqlFilter) opts.CQL_FILTER = cqlFilter;
     return L.tileLayer.wms(IGN_WMS, opts);
   }
 
+  // Rebuild the WMS layer ONLY when the CQL_FILTER actually changed. Otherwise reuse it —
+  // Leaflet keeps its tile cache and avoids re-requesting every PNG on every map move.
   function refreshRpgLayer() {
+    const newFilter = currentFilter();
+    if (rpgLayer && newFilter === currentCqlFilter) return;
+    currentCqlFilter = newFilter;
     const wasOnMap = !rpgLayer || app.map.hasLayer(rpgLayer);
     if (rpgLayer) {
       app.map.removeLayer(rpgLayer);
       if (layerCtl) layerCtl.removeLayer(rpgLayer);
     }
-    rpgLayer = buildRpgLayer().addTo(app.map);
+    rpgLayer = buildRpgLayer(newFilter).addTo(app.map);
     if (layerCtl) layerCtl.addOverlay(rpgLayer, "RPG (parcelles agricoles)");
     if (!wasOnMap) app.map.removeLayer(rpgLayer);
   }
@@ -141,19 +149,19 @@ export function installChips(app) {
     opacity: 0.55,
   });
 
-  // Initial RPG render.
-  rpgLayer = buildRpgLayer().addTo(app.map);
+  // Initial RPG render — deferred when a Dropbox restore is imminent (the layer would be
+  // re-fetched anyway once fitBounds moves the map to the actual parcels).
+  if (!app.getPendingDbxLoad()) {
+    currentCqlFilter = "";
+    rpgLayer = buildRpgLayer("").addTo(app.map);
+  }
 
+  // Layer control: only the cadastre is registered initially; the RPG layer registers itself
+  // via refreshRpgLayer (called either now or lazily after Dropbox restore completes).
   const layerCtl = L.control
-    .layers(
-      null,
-      {
-        "RPG (parcelles agricoles)": rpgLayer,
-        "Cadastre (toutes parcelles)": cadastreLayer,
-      },
-      { collapsed: false }
-    )
+    .layers(null, { "Cadastre (toutes parcelles)": cadastreLayer }, { collapsed: false })
     .addTo(app.map);
+  if (rpgLayer) layerCtl.addOverlay(rpgLayer, "RPG (parcelles agricoles)");
 
   // Debounced refresh on map move.
   let _chipsTimer = null;

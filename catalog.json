@@ -1,5 +1,14 @@
 {
-  "_comment": "Application catalog. Keyed by RPG code_cultu. Extend freely. Loaded dynamically by index.html at startup; falls back to a minimal inline default if this file is unreachable. Each entry MAY include: scientific (Linnaean), fr (common FR), emoji, eppo (6-letter Plant Protection Organization code), gbif (GBIF taxon key), wikidata (Wikidata QID), image (local URL override), locals (dialect translations).",
+  "_comment": "Application catalog. Loaded dynamically at startup; the inline catalog in js/catalog.js is a minimal fallback. `crops` is keyed by RPG code_cultu; `diseases` is keyed by scientific name (the value Claude returns). Each entry MAY include: scientific (Linnaean), fr (common FR), emoji, eppo (6-letter EPPO code), gbif (GBIF taxon key), wikidata (Wikidata QID), image (curated URL — preferred over dynamic Wikipedia/iNaturalist lookup), locals (dialect translations).",
+  "diseases": {
+    "_example_Mycosphaerella fijiensis": {
+      "name_fr": "Cercosporiose noire",
+      "eppo": "MYCOFI",
+      "scientific": "Mycosphaerella fijiensis",
+      "image": "https://upload.wikimedia.org/wikipedia/commons/…/sigatoka-noire.jpg",
+      "locals": { "rcf": "Maladi nwar" }
+    }
+  },
   "crops": {
     "BAN": {
       "scientific": "Musa × paradisiaca",

@@ -69,16 +69,21 @@ export function installParcels(app) {
       }).addTo(parcelHighlight);
       const identified = resolveIdentifiedCropMeta(app.getAnalysisCombined()?.identification);
       const meta = identified || cropMeta(p.props?.code_cultu);
-      if (meta.emoji) {
+      // Effective BIO: user override wins, else fall back to the RPG flag.
+      const bioMode = app.getBioMode();
+      const isBio = bioMode === "bio" || (bioMode === "auto" && p.props?.bio === 1);
+      if (meta.emoji || isBio) {
         const center = layer.getBounds().getCenter();
+        const bioBadge = isBio ? `<span class="parcel-bio" title="Agriculture biologique">🌱</span>` : "";
         L.marker(center, {
           interactive: false,
           keyboard: false,
           icon: L.divIcon({
             className: "",
-            html: `<div class="parcel-emoji" title="${meta.fr}">${meta.emoji}</div>`,
-            iconSize: [28, 28],
-            iconAnchor: [14, 14],
+            html: `<div class="parcel-emoji-wrap"><div class="parcel-emoji" title="${meta.fr}">${meta.emoji || ""}</div>${bioBadge}</div>`,
+            // Wider iconSize to accommodate the crop emoji + the small BIO leaf to its right.
+            iconSize: [48, 28],
+            iconAnchor: [24, 14],
           }),
         }).addTo(parcelHighlight);
       }

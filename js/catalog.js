@@ -43,6 +43,13 @@ export const CROP_CATALOG = {
 // Backward-compatible {code → FR label} map derived from CROP_CATALOG.
 export const CULTU_LABELS = {};
 
+// Disease catalog — keyed by scientific name (the value Claude returns in identification).
+// Inline defaults are intentionally empty; entries flow in from catalog.json at startup.
+// Each value can be either:
+//   - a string (direct image URL, legacy/quick), or
+//   - an object { name_fr, name_local, scientific, eppo, image, … }
+export const DISEASE_CATALOG = {};
+
 export function cropMeta(code) {
   return CROP_CATALOG[code] || { fr: code, emoji: "🌱" };
 }
@@ -84,6 +91,12 @@ export async function loadCatalogJson() {
       Object.assign(CROP_CATALOG, j.crops);
       rebuildCultuLabels();
     }
+    if (j?.diseases) {
+      // Drop the schema-example entries (keys starting with "_").
+      for (const [k, v] of Object.entries(j.diseases)) {
+        if (!k.startsWith("_")) DISEASE_CATALOG[k] = v;
+      }
+    }
   } catch {
     /* offline / file:// — inline catalog stands */
   }
@@ -94,10 +107,12 @@ export async function loadCatalogJson() {
 export async function lookupTaxonImage(sciName, commonFr, catalog = CROP_CATALOG) {
   const tryKeys = [sciName, commonFr].filter(Boolean);
 
-  // 1. Local catalog
+  // 1. Local catalog — entries may be either a plain URL string OR a rich object {image, …}.
   for (const k of tryKeys) {
     const hit = catalog[k] || catalog[k.toLowerCase()];
-    if (hit) return { url: hit, source: "catalogue local" };
+    if (!hit) continue;
+    const url = typeof hit === "string" ? hit : hit.image;
+    if (url) return { url, source: "catalogue local" };
   }
 
   // 2. Wikipedia FR + EN, per key

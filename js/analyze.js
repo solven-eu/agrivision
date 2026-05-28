@@ -5,7 +5,7 @@
 
 import { WORKER_URL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL } from "./config.js";
 import { SYSTEM_PROMPT, buildContextBlock } from "./prompts.js";
-import { FULL_REPORT_SCHEMA } from "./schemas.js";
+import { FULL_REPORT_SCHEMA, DISEASES_SCHEMA, PHOTO_TAG_SCHEMA } from "./schemas.js";
 import { aggregateParcels } from "./state.js";
 import { robustParseJson } from "./util.js";
 
@@ -51,7 +51,12 @@ export function createAnalyze(app) {
     const hasParcels = app.selectedParcels.size > 0;
     const hasInputs = hasPhotos || hasParcels;
     const start = document.getElementById("chat-start");
-    if (start && app.conversation.length === 0) start.disabled = !hasInputs || app.isChatBusy();
+    if (start) {
+      // Démarrer = turn 0 only. Once the conversation has any turns, disable to avoid the
+      // sendTurn(null)-after-restore code path that was throwing.
+      if (app.conversation.length > 0) start.disabled = true;
+      else start.disabled = !hasInputs || app.isChatBusy();
+    }
     if (app.conversation.length > 0) {
       const top = Object.entries(app.userProfile.scores || {})
         .filter(([, v]) => v > 0)
@@ -127,6 +132,7 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
       const r = await fetch(url, { method: "POST", headers, body: payload });
       const j = await r.json();
       if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+      app.onUsage?.(j.usage, ANTHROPIC_MODEL);
       const rawText = j.content?.[0]?.text || "";
       document.getElementById("raw").textContent = rawText;
       const parsed = robustParseJson(rawText);
@@ -165,6 +171,7 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
       app.renderMetrics(merged);
       if (merged.diseases) {
         app.renderDiseases(merged.diseases, {
+          photos: app.photos,
           t_per_ha: merged.yield?.estimated_t_per_ha,
           price_eur_per_kg: merged.market?.indicative_price_eur_per_kg,
           total_area_ha: merged.parcels_summary?.total_area_ha,
@@ -193,11 +200,249 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
     lastAnalyzedFingerprint = v;
   }
 
+  // Lazy generation of the "Marché" or "Notes" cell. Lightweight call: no photo payload,
+  // just the context block + the identification the parent already has, and a tight schema.
+  async function generateField(scope) {
+    if (!WORKER_URL && !ANTHROPIC_API_KEY) {
+      app.aStatus.textContent = "Configure le worker/clé.";
+      return;
+    }
+    const current = app.getAnalysisCombined() || {};
+    const idBlock = current.identification || {};
+    const yieldBlock = current.yield || {};
+    const parcelsBlock = current.parcels_summary || {};
+    const ctx = buildContextBlock({
+      selectedParcels: app.selectedParcels,
+      photos: app.photos,
+      currentAddress: app.getCurrentAddress(),
+      bioMode: app.getBioMode(),
+      map: app.map,
+    });
+    const schema =
+      scope === "market"
+        ? `{"market":{"indicative_price_eur_per_kg":"number — prix DÉPART PRODUCTEUR (€/kg) selon RNM FranceAgriMer / cours départemental pour la culture+région+saison","source_hint":"string — référentiel cité (ex: 'RNM FranceAgriMer — banane export Réunion 2025')","notes":"string — caveats sur le prix : variabilité, conditions de campagne, écart vrac/conditionné"}}`
+        : `{"notes":"string — caveats de l'analyse (3-5 phrases) : ce qui n'a pas pu être évalué faute de photos, les hypothèses prises, et un avertissement honnête sur les limites de la prédiction"}`;
+    const knownCtx = `Culture identifiée : ${idBlock.dominant_crop_fr || "?"}${idBlock.cultivar_or_variety_fr ? ` (${idBlock.cultivar_or_variety_fr})` : ""}${idBlock.scientific_name ? ` — ${idBlock.scientific_name}` : ""}.
+Surface totale : ${parcelsBlock.total_area_ha ?? "?"} ha.
+Rendement estimé : ${yieldBlock.estimated_t_per_ha ?? "?"} t/ha.`;
+    const userText = `${ctx}
+
+${knownCtx}
+
+Schéma JSON cible (rempli uniquement avec ${scope === "market" ? "les infos de marché" : "des notes / caveats"}) :
+${schema}
+
+Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
+    app.aStatus.textContent = scope === "market" ? "🌾 Génération marché…" : "📝 Génération notes…";
+    const useWorker = !!WORKER_URL;
+    const url = useWorker
+      ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze`
+      : "https://api.anthropic.com/v1/messages";
+    const headers = useWorker
+      ? { "content-type": "application/json", "anthropic-version": "2023-06-01" }
+      : {
+          "content-type": "application/json",
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        };
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: ANTHROPIC_MODEL,
+          max_tokens: 800,
+          system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
+          messages: [{ role: "user", content: [{ type: "text", text: userText }] }],
+        }),
+      });
+      const j = await r.json();
+      if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+      app.onUsage?.(j.usage, ANTHROPIC_MODEL);
+      const parsed = robustParseJson(j.content?.[0]?.text || "");
+      const merged = { ...current };
+      if (scope === "market" && parsed.market) {
+        merged.market = { ...(merged.market || {}), ...parsed.market };
+        // Recompute total value if price came in fresh.
+        if (parsed.market.indicative_price_eur_per_kg && merged.yield?.estimated_total_t) {
+          merged.market.estimated_total_value_eur =
+            merged.yield.estimated_total_t * 1000 * parsed.market.indicative_price_eur_per_kg;
+        }
+      } else if (scope === "notes" && parsed.notes) {
+        merged.notes = parsed.notes;
+      }
+      app.setAnalysisCombined(merged);
+      app.renderMetrics(merged);
+      app.saveAnalysis?.({
+        analysis: merged,
+        conversation: app.conversation,
+        user_profile: app.userProfile,
+      });
+      app.aStatus.textContent = scope === "market" ? "✓ Marché à jour" : "✓ Notes à jour";
+    } catch (e) {
+      app.aStatus.textContent = "Erreur : " + e.message;
+      app.renderMetrics(current); // restore button
+    }
+  }
+
+  // Lazy generation of the disease section. Heavier than market/notes because we send the
+  // photos: the model needs them to fill `evidence.supporting` + `detections` + photo-grounded
+  // `missing` items. Uses DISEASES_SCHEMA to keep the response narrow (no health/yield/etc).
+  async function generateDiseases() {
+    if (!WORKER_URL && !ANTHROPIC_API_KEY) {
+      app.aStatus.textContent = "Configure le worker/clé.";
+      return;
+    }
+    const current = app.getAnalysisCombined() || {};
+    const idBlock = current.identification || {};
+    const phBlock = current.phenology || {};
+    const ctx = buildContextBlock({
+      selectedParcels: app.selectedParcels,
+      photos: app.photos,
+      currentAddress: app.getCurrentAddress(),
+      bioMode: app.getBioMode(),
+      map: app.map,
+    });
+    const knownCtx = `Culture identifiée : ${idBlock.dominant_crop_fr || "?"}${idBlock.cultivar_or_variety_fr ? ` (${idBlock.cultivar_or_variety_fr})` : ""}${idBlock.scientific_name ? ` — ${idBlock.scientific_name}` : ""}.
+Stade phénologique : ${phBlock.current_stage || "?"}. Récolte dans ${phBlock.expected_harvest_in_days ?? "?"} j.`;
+    const userText = `${ctx}
+
+${knownCtx}
+
+Schéma JSON cible :
+${JSON.stringify(DISEASES_SCHEMA, null, 2)}
+
+Consigne : applique LA MÉTHODE EN 6 ÉTAPES vue dans le system prompt (base rate → evidence → conclusion → progression → 3 scénarios → E[impact]). Si peu d'éléments visuels, déclare-le honnêtement via \`unknown_rate_0_1\` élevé et \`evidence.missing\` actionnable.
+
+Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
+    app.aStatus.textContent = "🔬 Analyse maladies en cours…";
+    const content = [];
+    for (const p of app.photos)
+      content.push({ type: "image", source: { type: "base64", media_type: p.mime, data: p.b64 } });
+    content.push({ type: "text", text: userText });
+    const useWorker = !!WORKER_URL;
+    const url = useWorker
+      ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze`
+      : "https://api.anthropic.com/v1/messages";
+    const headers = useWorker
+      ? { "content-type": "application/json", "anthropic-version": "2023-06-01" }
+      : {
+          "content-type": "application/json",
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        };
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: ANTHROPIC_MODEL,
+          max_tokens: 6000,
+          system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
+          messages: [{ role: "user", content }],
+        }),
+      });
+      const j = await r.json();
+      if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+      app.onUsage?.(j.usage, ANTHROPIC_MODEL);
+      const parsed = robustParseJson(j.content?.[0]?.text || "");
+      const merged = { ...current };
+      if (Array.isArray(parsed.diseases)) merged.diseases = parsed.diseases;
+      app.setAnalysisCombined(merged);
+      app.renderDiseases(merged.diseases, {
+        t_per_ha: merged.yield?.estimated_t_per_ha,
+        price_eur_per_kg: merged.market?.user_price_eur_per_kg ?? merged.market?.indicative_price_eur_per_kg,
+        total_area_ha: merged.parcels_summary?.total_area_ha,
+        photos: app.photos,
+      });
+      app.saveAnalysis?.({
+        analysis: merged,
+        conversation: app.conversation,
+        user_profile: app.userProfile,
+      });
+      app.aStatus.textContent = `✓ ${parsed.diseases?.length || 0} maladie(s) analysée(s)`;
+    } catch (e) {
+      app.aStatus.textContent = "Erreur : " + e.message;
+      // Restore previous render so the button comes back.
+      app.renderDiseases(current.diseases, {
+        t_per_ha: current.yield?.estimated_t_per_ha,
+        price_eur_per_kg:
+          current.market?.user_price_eur_per_kg ?? current.market?.indicative_price_eur_per_kg,
+        total_area_ha: current.parcels_summary?.total_area_ha,
+        photos: app.photos,
+      });
+    }
+  }
+
+  // Per-photo analysis. Fired automatically on upload and on the 🔬 button click.
+  // Single-image payload, narrow PHOTO_TAG_SCHEMA. Mutates `photo.tags` and re-renders.
+  async function analyzePhoto(photo) {
+    if (!WORKER_URL && !ANTHROPIC_API_KEY) {
+      photo.analyzing = false;
+      return;
+    }
+    const schema = JSON.stringify(PHOTO_TAG_SCHEMA, null, 2);
+    const userText = `Analyse cette UNIQUE photo de manière autonome — ne suppose pas d'autres photos.
+
+Renvoie un objet JSON conforme au schéma suivant (photo_index = 1) :
+${schema}
+
+Sois honnête sur ce qui n'est pas évaluable (mets null). Format : UNIQUEMENT le JSON. Pas de markdown.`;
+    const content = [
+      { type: "image", source: { type: "base64", media_type: photo.mime, data: photo.b64 } },
+      { type: "text", text: userText },
+    ];
+    const useWorker = !!WORKER_URL;
+    const url = useWorker
+      ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze`
+      : "https://api.anthropic.com/v1/messages";
+    const headers = useWorker
+      ? { "content-type": "application/json", "anthropic-version": "2023-06-01" }
+      : {
+          "content-type": "application/json",
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        };
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: ANTHROPIC_MODEL,
+          max_tokens: 800,
+          system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
+          messages: [{ role: "user", content }],
+        }),
+      });
+      const j = await r.json();
+      if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+      app.onUsage?.(j.usage, ANTHROPIC_MODEL);
+      const parsed = robustParseJson(j.content?.[0]?.text || "");
+      photo.tags = { ...(photo.tags || {}), ...parsed, analyzed_at: new Date().toISOString() };
+    } catch (e) {
+      console.warn("analyzePhoto error:", e.message);
+    } finally {
+      photo.analyzing = false;
+      app.renderPhotos();
+      app.saveAnalysis?.({
+        analysis: app.getAnalysisCombined(),
+        conversation: app.conversation,
+        user_profile: app.userProfile,
+      });
+    }
+  }
+
   return {
     inputFingerprint,
     setButtonsDisabled,
     updateAnalyzeAvailability,
     generateReport,
+    generateField,
+    generateDiseases,
+    analyzePhoto,
     getLastFingerprint,
     setLastFingerprint,
   };

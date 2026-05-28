@@ -2,6 +2,7 @@
 // Returns bound functions so call sites in main.js stay short.
 
 import { compressImage, cardinal, destPoint, formatRelativeDays } from "./util.js";
+import { openImageModal } from "./metrics.js";
 
 /**
  * @param {object} app - dependency bundle:
@@ -66,6 +67,13 @@ export function createPhotos(app) {
 
   function renderPhotos() {
     app.thumbsEl.innerHTML = "";
+    // Keep the photos-section <summary> in sync with the bank size so the user sees the count
+    // without expanding.
+    const sumEl = document.getElementById("photos-summary-count");
+    if (sumEl) {
+      const n = app.photos.length;
+      sumEl.textContent = n === 0 ? "Photos de la culture" : `Photos de la culture (${n})`;
+    }
     app.photos.forEach((p, i) => {
       const wrap = document.createElement("div");
       wrap.className = "photo-card";
@@ -75,11 +83,18 @@ export function createPhotos(app) {
           : `<div style="color:var(--bad)">📍 Pas de GPS dans la photo</div>`;
       const dir =
         p.direction != null ? `<div>🧭 ${Math.round(p.direction)}° ${cardinal(p.direction)}</div>` : "";
-      const time = p.takenAt
-        ? `<div title="${p.takenAt.toLocaleString("fr-FR")}">🕒 ${formatRelativeDays((p.takenAt - Date.now()) / 86400000)}</div>`
+      // Date chip: click to edit. Source badge distinguishes EXIF (auto) from manual.
+      const timeSource = p.takenAt
+        ? p.takenAtSource === "manual"
+          ? '<span style="color:var(--warn);font-size:9px"> manuel</span>'
+          : '<span style="color:var(--accent);font-size:9px"> EXIF</span>'
+        : "";
+      const timeLabel = p.takenAt
+        ? `🕒 ${formatRelativeDays((p.takenAt - Date.now()) / 86400000)}${timeSource}`
         : p.exifFound
-          ? `<div style="color:var(--muted)">🕒 Pas d'horodatage</div>`
-          : `<div style="color:var(--muted)">🕒 Pas d'EXIF</div>`;
+          ? `📅 Dater la photo…`
+          : `📅 Dater la photo…`;
+      const time = `<div class="photo-date" data-id="${p.id}" title="${p.takenAt ? p.takenAt.toLocaleString("fr-FR") + " — cliquer pour modifier" : "Cliquer pour saisir une date (aujourd'hui par défaut)"}" style="cursor:pointer;color:${p.takenAt ? "inherit" : "var(--muted)"}">${timeLabel}</div>`;
       const tags = p.tags || {};
       const tagBadges = [];
       if (tags.shot_type && tags.shot_type !== "unknown")
@@ -107,9 +122,9 @@ export function createPhotos(app) {
             : "Représentativité inconnue";
       const repBadge = `<button class="rep-toggle" data-id="${p.id}" title="${repTitle}" style="background:transparent;border:1px solid var(--border);color:inherit;border-radius:8px;padding:1px 5px;font-size:9px;cursor:pointer">Repr. ${repState}</button>`;
       wrap.innerHTML = `
-        <div style="position:relative">
-          <img src="${p.dataUrl}" alt="${p.name}" />
-          <div style="position:absolute;top:-4px;left:-4px;background:var(--accent);color:#0a0e13;border-radius:50%;width:16px;height:16px;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center">${i + 1}</div>
+        <div class="photo-slot" data-photo-id="${p.id}" style="position:relative;cursor:${p.lat != null ? "crosshair" : "default"}" title="${p.lat != null ? "Cliquer autour de la photo pour recentrer la carte" : ""}">
+          <img class="photo-img" src="${p.dataUrl}" alt="${p.name}" data-photo-id="${p.id}" style="cursor:zoom-in" title="Cliquer pour agrandir" />
+          <div style="position:absolute;top:-4px;left:-4px;background:var(--accent);color:#0a0e13;border-radius:50%;width:16px;height:16px;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;pointer-events:none">${i + 1}</div>
         </div>
         <div class="meta">
           <div title="${p.name}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</div>
@@ -118,6 +133,7 @@ export function createPhotos(app) {
           <div style="display:flex;gap:4px;margin-top:2px;flex-wrap:wrap">
             <button class="secondary place" data-id="${p.id}">${p.lat != null ? "Replacer" : "📍 Placer"}</button>
             <button class="secondary aim" data-id="${p.id}" ${p.lat == null ? "disabled title='Place la photo d&apos;abord'" : ""}>🧭 Direction</button>
+            <button class="secondary analyze-photo" data-id="${p.id}" ${p.analyzing ? "disabled" : ""} title="${p.analyzing ? "Analyse en cours…" : "Relancer l'analyse de cette photo"}">${p.analyzing ? "🔬 …" : p.tags?.analyzed_at ? "🔬 ↻" : "🔬 Analyser"}</button>
           </div>
         </div>
         <button class="del" data-id="${p.id}">×</button>
@@ -135,6 +151,69 @@ export function createPhotos(app) {
           app.onSchedule();
         })
     );
+    // Date editor — clicking the date chip swaps it in-place for a native <input type="date">.
+    // Default value = current takenAt OR today, so a single Enter/blur sets "today".
+    app.thumbsEl.querySelectorAll(".photo-date").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        const id = chip.dataset.id;
+        const p = app.photos.find((x) => x.id === id);
+        if (!p) return;
+        const isoDefault = (p.takenAt || new Date()).toISOString().slice(0, 10);
+        const input = document.createElement("input");
+        input.type = "date";
+        input.value = isoDefault;
+        input.style.cssText = "font-size:11px;padding:2px 4px;width:120px";
+        const clear = document.createElement("button");
+        clear.textContent = "✕";
+        clear.title = "Effacer la date";
+        clear.style.cssText =
+          "background:transparent;border:0;color:var(--bad);font-size:10px;cursor:pointer;padding:0 4px";
+        const wrap = document.createElement("div");
+        wrap.style.cssText = "display:inline-flex;gap:2px;align-items:center";
+        wrap.appendChild(input);
+        wrap.appendChild(clear);
+        chip.replaceWith(wrap);
+        input.focus();
+        let committed = false;
+        const commit = (newDateOrNull) => {
+          if (committed) return;
+          committed = true;
+          p.takenAt = newDateOrNull;
+          if (newDateOrNull) p.takenAtSource = "manual";
+          else delete p.takenAtSource;
+          renderPhotos();
+          app.onSchedule();
+        };
+        input.addEventListener("change", () => {
+          const v = input.value;
+          if (!v) {
+            commit(null);
+            return;
+          }
+          // Use noon UTC to avoid timezone-edge surprises that would shift the displayed day.
+          const d = new Date(`${v}T12:00:00`);
+          commit(isNaN(d.getTime()) ? null : d);
+        });
+        input.addEventListener("blur", () => {
+          if (committed) return;
+          // Treat a bare blur with the default value as "accept today" so a single click commits.
+          const v = input.value || isoDefault;
+          const d = new Date(`${v}T12:00:00`);
+          commit(isNaN(d.getTime()) ? null : d);
+        });
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") input.blur();
+          else if (e.key === "Escape") {
+            committed = true;
+            renderPhotos();
+          }
+        });
+        clear.addEventListener("click", (e) => {
+          e.stopPropagation();
+          commit(null);
+        });
+      });
+    });
     app.thumbsEl.querySelectorAll(".place").forEach(
       (b) =>
         (b.onclick = (e) => {
@@ -153,6 +232,20 @@ export function createPhotos(app) {
           app.aStatus.textContent = "Cliquez sur la carte vers où la photo a été prise (Echap pour annuler).";
         })
     );
+    app.thumbsEl.querySelectorAll(".analyze-photo").forEach((b) => {
+      b.onclick = (e) => {
+        const id = e.currentTarget.dataset.id;
+        const p = app.photos.find((x) => x.id === id);
+        if (!p || p.analyzing || !app.analyzePhoto) return;
+        p.analyzing = true;
+        renderPhotos();
+        app.analyzePhoto(p).catch((err) => {
+          console.warn("per-photo analysis failed:", err.message);
+          p.analyzing = false;
+          renderPhotos();
+        });
+      };
+    });
     app.thumbsEl.querySelectorAll(".del").forEach(
       (b) =>
         (b.onclick = (e) => {
@@ -170,6 +263,37 @@ export function createPhotos(app) {
           }
         })
     );
+    // Image click → fullscreen modal (zoom). Stop bubbling so the slot's
+    // map-recenter handler doesn't also fire.
+    app.thumbsEl.querySelectorAll(".photo-img").forEach((img) => {
+      img.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const id = img.dataset.photoId;
+        const p = app.photos.find((x) => x.id === id);
+        if (!p) return;
+        const meta = [];
+        if (p.lat != null) meta.push(`📍 ${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}`);
+        if (p.direction != null) meta.push(`🧭 ${Math.round(p.direction)}° ${cardinal(p.direction)}`);
+        if (p.takenAt) meta.push(`🕒 ${p.takenAt.toLocaleString("fr-FR")}`);
+        openImageModal(
+          p.dataUrl,
+          `<b>${p.name}</b><br><span class="small">${meta.join(" · ")}</span>`,
+          p.dataUrl
+        );
+      });
+    });
+    // Slot (frame around image) click → recenter map on photo location.
+    // Only fires when the click target is the slot itself, not the image.
+    app.thumbsEl.querySelectorAll(".photo-slot").forEach((slot) => {
+      slot.addEventListener("click", (e) => {
+        if (e.target.classList.contains("photo-img")) return;
+        const id = slot.dataset.photoId;
+        const p = app.photos.find((x) => x.id === id);
+        if (!p || p.lat == null) return;
+        app.map.setView([p.lat, p.lon], Math.max(app.map.getZoom(), 17), { animate: true });
+        if (p.marker) p.marker.openPopup?.();
+      });
+    });
   }
 
   async function addPhotoFromFile(f, presetTags = []) {
@@ -210,6 +334,7 @@ export function createPhotos(app) {
       lon: gps?.longitude ?? null,
       direction,
       takenAt,
+      takenAtSource: takenAt ? "exif" : null,
       exifFound,
       representative: presetTags.includes("typical") ? true : null,
       tags: Object.keys(tagPreset).length ? tagPreset : null,
@@ -219,6 +344,17 @@ export function createPhotos(app) {
     };
     app.photos.push(photo);
     if (photo.lat != null) placePhotoMarker(photo);
+    // Fire-and-forget per-photo analysis. Sets `photo.analyzing = true` immediately so
+    // the next renderPhotos shows a spinner; the analyzer flips it back and re-renders
+    // when done. We don't await — the user keeps interacting freely.
+    if (app.analyzePhoto) {
+      photo.analyzing = true;
+      app.analyzePhoto(photo).catch((e) => {
+        console.warn("per-photo analysis failed:", e.message);
+        photo.analyzing = false;
+        if (typeof renderPhotos === "function") renderPhotos();
+      });
+    }
     return photo;
   }
 

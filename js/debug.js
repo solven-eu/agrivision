@@ -57,4 +57,25 @@ export function initDebug(app) {
     localStorage.clear();
     show("localStorage vidé. Rechargez.");
   };
+
+  // Image-discovery export: dumps every image URL that lookupTaxonImage has resolved via the
+  // fallback chain (Wikipedia / iNaturalist). Use this to harvest URLs and merge them into
+  // catalog.json so they become first-class catalog entries (no more dynamic probing).
+  const exportBtn = document.getElementById("dbg-export-images");
+  if (exportBtn)
+    exportBtn.onclick = () => {
+      const discoveries = {};
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k.startsWith("img:") && !k.startsWith("inat:")) continue;
+        const v = localStorage.getItem(k);
+        if (!v || v === "MISS") continue;
+        const taxon = k.slice(k.indexOf(":") + 1);
+        const [source, url] = v.includes("|") ? v.split("|", 2) : ["iNaturalist", v];
+        discoveries[taxon] = { source, image: url };
+      }
+      const json = JSON.stringify(discoveries, null, 2);
+      show(json);
+      navigator.clipboard?.writeText(json);
+    };
 }

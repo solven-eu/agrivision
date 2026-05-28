@@ -26,10 +26,227 @@ export function createChat(app) {
   let chatBusy = false;
   let freeTextOpen = false;
 
+  // User-initiated composer state. Photos attached here are sent with the next text turn.
+  // Cleared after submit.
+  let composerPhotos = [];
+
+  // Adds files to the composer attachments; shared by all source paths.
+  async function attachFiles(fileList) {
+    const files = [...(fileList || [])];
+    for (const f of files) {
+      const p = await app.addPhotoFromFile(f, []);
+      composerPhotos.push(p);
+    }
+    app.renderPhotos();
+    app.onSchedule();
+    renderComposerAttachments();
+  }
+
+  // Modal asking the user *how* they want to attach a photo: pick from bank,
+  // take a new one (mobile camera or desktop fallback), or drag-drop / browse.
+  async function showPhotoSourceChooser() {
+    return new Promise((resolve) => {
+      const modal = document.createElement("div");
+      modal.style.cssText =
+        "position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:20px";
+      const bankCount = app.photos?.length || 0;
+      modal.innerHTML = `
+        <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;max-width:420px;width:100%;display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <h3 style="margin:0;font-size:16px">Envoyer une photo</h3>
+            <button data-close aria-label="Fermer" style="background:transparent;border:0;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">×</button>
+          </div>
+          ${
+            bankCount > 0
+              ? `<button class="src-bank" style="text-align:left;padding:10px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;color:var(--text);cursor:pointer;font-size:13px">📂 Choisir dans la banque (${bankCount} dispo${bankCount > 1 ? "s" : ""})</button>`
+              : `<div class="small" style="color:var(--muted)">Aucune photo dans la banque pour l'instant.</div>`
+          }
+          <button class="src-camera" style="text-align:left;padding:10px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;color:var(--text);cursor:pointer;font-size:13px">📷 Prendre une photo</button>
+          <div class="src-drop" style="padding:18px;text-align:center;border:2px dashed var(--border);border-radius:6px;color:var(--muted);cursor:pointer;font-size:12px">🖼 Glisser-déposer ici ou cliquer pour parcourir</div>
+        </div>`;
+      document.body.appendChild(modal);
+      const close = () => {
+        if (modal.parentNode) modal.remove();
+        resolve();
+      };
+      modal.querySelector("[data-close]").onclick = close;
+      modal.addEventListener("click", (e) => {
+        if (e.target === modal) close();
+      });
+
+      modal.querySelector(".src-bank")?.addEventListener("click", () => {
+        modal.remove();
+        showBankPicker().then(resolve);
+      });
+
+      modal.querySelector(".src-camera").onclick = () => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "image/*";
+        input.capture = "environment";
+        input.onchange = async () => {
+          await attachFiles(input.files);
+          close();
+        };
+        input.click();
+      };
+
+      const drop = modal.querySelector(".src-drop");
+      drop.addEventListener("click", () => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "image/*";
+        input.multiple = true;
+        input.onchange = async () => {
+          await attachFiles(input.files);
+          close();
+        };
+        input.click();
+      });
+      drop.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        drop.style.background = "var(--panel2)";
+      });
+      drop.addEventListener("dragleave", () => {
+        drop.style.background = "";
+      });
+      drop.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        drop.style.background = "";
+        const files = [...(e.dataTransfer?.files || [])].filter((f) => f.type.startsWith("image/"));
+        if (files.length) {
+          await attachFiles(files);
+          close();
+        }
+      });
+    });
+  }
+
+  // Secondary modal: pick one or more photos from the existing bank.
+  async function showBankPicker() {
+    return new Promise((resolve) => {
+      const modal = document.createElement("div");
+      modal.style.cssText =
+        "position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:20px";
+      const grid = (app.photos || [])
+        .map(
+          (p, i) =>
+            `<button class="bank-pick" data-id="${p.id}" style="background:transparent;border:1px solid var(--border);border-radius:4px;padding:4px;cursor:pointer;color:var(--text)">
+              <img src="${p.dataUrl}" style="width:96px;height:96px;object-fit:cover;display:block;border-radius:2px"/>
+              <div style="font-size:9px;margin-top:2px;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${i + 1}. ${p.name}</div>
+            </button>`
+        )
+        .join("");
+      modal.innerHTML = `
+        <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;max-width:640px;width:100%;max-height:80vh;overflow:auto">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <h3 style="margin:0;font-size:16px">Choisir dans la banque</h3>
+            <button data-close aria-label="Fermer" style="background:transparent;border:0;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">×</button>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px">${grid}</div>
+        </div>`;
+      document.body.appendChild(modal);
+      const close = () => {
+        if (modal.parentNode) modal.remove();
+        resolve();
+      };
+      modal.querySelector("[data-close]").onclick = close;
+      modal.addEventListener("click", (e) => {
+        if (e.target === modal) close();
+      });
+      modal.querySelectorAll(".bank-pick").forEach((b) => {
+        b.addEventListener("click", () => {
+          const id = b.dataset.id;
+          const p = app.photos.find((x) => x.id === id);
+          if (p && !composerPhotos.find((x) => x.id === id)) composerPhotos.push(p);
+          renderComposerAttachments();
+          close();
+        });
+      });
+    });
+  }
+
+  // Backwards-compat: keep composerPickPhoto exported for the 📎 button.
+  // Now routes through the chooser so the UX is the same everywhere.
+  async function composerPickPhoto() {
+    return showPhotoSourceChooser();
+  }
+
+  function renderComposerAttachments() {
+    const host = document.getElementById("chat-attachments");
+    if (!host) return;
+    if (composerPhotos.length === 0) {
+      host.style.display = "none";
+      host.innerHTML = "";
+      return;
+    }
+    host.style.display = "flex";
+    host.innerHTML = composerPhotos
+      .map(
+        (p, i) =>
+          `<div style="display:inline-flex;align-items:center;gap:4px;background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:10px">
+             <img src="${p.dataUrl}" style="width:24px;height:24px;object-fit:cover;border-radius:2px"/>
+             ${p.name.slice(0, 14)}${p.name.length > 14 ? "…" : ""}
+             <button data-composer-remove="${i}" style="background:transparent;border:none;color:var(--bad);cursor:pointer;font-weight:700;padding:0 2px">×</button>
+           </div>`
+      )
+      .join("");
+    host.querySelectorAll("[data-composer-remove]").forEach(
+      (b) =>
+        (b.onclick = (e) => {
+          const idx = parseInt(e.target.dataset.composerRemove, 10);
+          composerPhotos.splice(idx, 1);
+          renderComposerAttachments();
+        })
+    );
+  }
+
+  // Apply Claude-supplied tags to an existing photo (used when the user reuses one from the bank
+  // instead of taking a new one for the take_photo action).
+  function applyTagsToPhoto(p, tags) {
+    if (!tags?.length) return;
+    const shot = tags.includes("single_plant")
+      ? "single_plant"
+      : tags.includes("overview")
+        ? "overview"
+        : tags.includes("detail")
+          ? "detail"
+          : null;
+    if (shot) p.tags = { ...(p.tags || {}), shot_type: shot };
+    if (tags.includes("typical")) p.representative = true;
+  }
+
   // ---------- Action handlers (user-facing UI actions Claude can suggest) ----------
+  // Each handler returns either { followup_text, attachPhotos? } — the latter is sent as image
+  // content blocks in the next turn so Claude actually SEES the newly-added / reused photos.
   const ACTION_HANDLERS = {
     take_photo: async (action) => {
       const tags = action.tags || [];
+
+      // If the bank has photos, offer reuse first — saves the user from re-shooting.
+      if (app.photos.length > 0) {
+        const list = app.photos
+          .map((p, i) => `${i + 1}. ${p.name}${p.tags?.shot_type ? " (" + p.tags.shot_type + ")" : ""}`)
+          .join("\n");
+        const ans = prompt(
+          `Photo : choisir dans la bibliothèque ou en prendre une nouvelle ?\n\n${list}\n${app.photos.length + 1}. 📷 Prendre une nouvelle photo\n\nEntrez le numéro :`
+        );
+        if (ans === null) return null;
+        const choice = parseInt(ans, 10);
+        if (!isNaN(choice) && choice >= 1 && choice <= app.photos.length) {
+          const p = app.photos[choice - 1];
+          applyTagsToPhoto(p, tags);
+          app.renderPhotos();
+          app.onSchedule();
+          const rep = p.representative === true ? " (marquée représentative)" : "";
+          return {
+            followup_text: `[Action: photo ${choice} (${p.name}) réutilisée${rep}]`,
+            attachPhotos: [p],
+          };
+        }
+        // Any other input (including choice = N+1) → fall through to camera capture.
+      }
+
       return new Promise((resolve) => {
         const input = document.createElement("input");
         input.type = "file";
@@ -47,7 +264,10 @@ export function createChat(app) {
           app.onSchedule();
           const types = added.map((p) => p.tags?.shot_type || "?").join(", ");
           const rep = added.some((p) => p.representative === true) ? " (marquée représentative)" : "";
-          resolve({ followup_text: `[Action: ${added.length} photo(s) ajoutée(s) — type: ${types}${rep}]` });
+          resolve({
+            followup_text: `[Action: ${added.length} photo(s) ajoutée(s) — type: ${types}${rep}]`,
+            attachPhotos: added,
+          });
         };
         input.click();
       });
@@ -69,7 +289,10 @@ export function createChat(app) {
       app.photos[idx].representative = true;
       app.renderPhotos();
       app.onSchedule();
-      return { followup_text: `[Action: photo ${idx + 1} (${app.photos[idx].name}) marquée représentative]` };
+      return {
+        followup_text: `[Action: photo ${idx + 1} (${app.photos[idx].name}) marquée représentative]`,
+        attachPhotos: [app.photos[idx]],
+      };
     },
 
     retake_photo: async (action) => {
@@ -86,11 +309,61 @@ export function createChat(app) {
   function renderChat() {
     const log = document.getElementById("chat-log");
     const actEl = document.getElementById("chat-actions");
+    // Auto-open the chat folding when there are messages or pending actions.
+    if (app.conversation.length > 0) {
+      const sec = document.getElementById("chat-section");
+      if (sec && !sec.open) sec.open = true;
+    }
     log.innerHTML = "";
     for (const m of app.conversation) {
       const div = document.createElement("div");
       div.className = "chat-msg " + m.role;
-      div.textContent = m.role === "user" ? m.display || m.content : m.message || m.content;
+      // Language-change marker, rendered above the bubble so the user can see what was
+      // signalled to the model on this turn.
+      if (m.role === "user" && m.dialectChangedFrom && m.dialect) {
+        const chip = document.createElement("div");
+        chip.textContent = `🌐 Langue : ${m.dialectChangedFrom} → ${m.dialect}`;
+        chip.style.cssText =
+          "font-size:10px;color:var(--accent);margin-bottom:4px;padding:2px 6px;background:var(--panel);border:1px solid var(--border);border-radius:8px;display:inline-block";
+        chip.title = "Le changement de langue a été signalé à l'IA dans ce message.";
+        div.appendChild(chip);
+      }
+      const textPart = document.createElement("div");
+      textPart.textContent = m.role === "user" ? m.display || m.content : m.message || m.content;
+      div.appendChild(textPart);
+      // User photo attachments: render a thumbnail strip so the conversation context is visible.
+      if (m.role === "user" && m.attachPhotoIds?.length) {
+        const strip = document.createElement("div");
+        strip.style.cssText =
+          "display:flex;gap:4px;margin-top:6px;padding-top:6px;border-top:1px dashed rgba(255,255,255,0.15);flex-wrap:wrap;align-items:center";
+        const label = document.createElement("span");
+        label.textContent = `📎 ${m.attachPhotoIds.length} photo${m.attachPhotoIds.length > 1 ? "s" : ""} :`;
+        label.style.cssText = "font-size:10px;color:var(--muted);margin-right:2px";
+        strip.appendChild(label);
+        for (const id of m.attachPhotoIds) {
+          const p = app.photos.find((x) => x.id === id);
+          if (!p) {
+            const missing = document.createElement("span");
+            missing.textContent = "(supprimée)";
+            missing.style.cssText = "font-size:10px;color:var(--bad);font-style:italic";
+            strip.appendChild(missing);
+            continue;
+          }
+          const thumb = document.createElement("img");
+          thumb.src = p.dataUrl;
+          thumb.alt = p.name;
+          thumb.title = `${p.name} — cliquer pour agrandir`;
+          thumb.style.cssText =
+            "width:40px;height:40px;object-fit:cover;border-radius:3px;border:1px solid var(--border);cursor:zoom-in";
+          thumb.addEventListener("click", () => {
+            import("./metrics.js").then(({ openImageModal }) => {
+              openImageModal(p.dataUrl, `<b>${p.name}</b>`, p.dataUrl);
+            });
+          });
+          strip.appendChild(thumb);
+        }
+        div.appendChild(strip);
+      }
       log.appendChild(div);
     }
     if (chatBusy) {
@@ -104,16 +377,20 @@ export function createChat(app) {
     actEl.innerHTML = "";
     const last = [...app.conversation].reverse().find((m) => m.role === "assistant");
     if (last?.next_actions && !chatBusy) {
-      for (const a of last.next_actions) {
+      // Filter out any free-text / send-photo style action the model may still produce —
+      // the permanent composer below already provides both, so duplicates clutter the UI.
+      const filteredActions = last.next_actions.filter((a) => {
+        const id = (a.id || "").toLowerCase();
+        if (id === "free_text" || id === "other" || id === "autre" || id === "send_photo") return false;
+        const label = (a.label || "").toLowerCase();
+        if (/^(autre|poser une question|envoyer une photo|free.?text)/.test(label.trim())) return false;
+        return true;
+      });
+      for (const a of filteredActions) {
         const b = document.createElement("button");
         b.className = "chat-action";
         b.textContent = a.label;
         b.onclick = async () => {
-          if (a.id === "free_text") {
-            freeTextOpen = true;
-            renderChat();
-            return;
-          }
           const handler = ACTION_HANDLERS[a.id];
           if (handler) {
             chatBusy = true;
@@ -121,7 +398,8 @@ export function createChat(app) {
             try {
               const result = await handler(a);
               chatBusy = false;
-              if (result?.followup_text) sendTurn({ kind: "text", text: result.followup_text });
+              if (result?.followup_text)
+                sendTurn({ kind: "text", text: result.followup_text, attachPhotos: result.attachPhotos });
               else renderChat();
             } catch (err) {
               chatBusy = false;
@@ -134,15 +412,26 @@ export function createChat(app) {
         };
         actEl.appendChild(b);
       }
-      const other = document.createElement("button");
-      other.className = "chat-action";
-      other.style.opacity = "0.7";
-      other.textContent = "✏ Autre…";
-      other.onclick = () => {
+      // Two always-available user-initiated forks (replaces the vague "Autre…").
+      // Both open the same composer; the photo variant pre-triggers the file picker.
+      const askBtn = document.createElement("button");
+      askBtn.className = "chat-action";
+      askBtn.textContent = "✏ Poser une question";
+      askBtn.onclick = () => {
         freeTextOpen = true;
         renderChat();
       };
-      actEl.appendChild(other);
+      actEl.appendChild(askBtn);
+
+      const photoBtn = document.createElement("button");
+      photoBtn.className = "chat-action";
+      photoBtn.textContent = "📷 Envoyer une photo";
+      photoBtn.onclick = async () => {
+        freeTextOpen = true;
+        renderChat();
+        await showPhotoSourceChooser();
+      };
+      actEl.appendChild(photoBtn);
     }
     document.getElementById("chat-input-row").style.display = freeTextOpen ? "flex" : "none";
     if (freeTextOpen) document.getElementById("chat-text").focus();
@@ -150,6 +439,7 @@ export function createChat(app) {
 
   function resetChat() {
     app.conversation.length = 0;
+    app.setConversationDialect?.(null);
     // Reset profile in place so direct refs in main.js + persistence stay valid.
     const up = app.userProfile;
     if (up.scores) for (const k of Object.keys(up.scores)) up.scores[k] = 0;
@@ -173,8 +463,28 @@ export function createChat(app) {
       return;
     }
     if (chatBusy) return;
+    if (app.isOverHardLimit?.()) {
+      app.aStatus.textContent = "⛔ Limite de tokens atteinte — Recommencer pour continuer.";
+      return;
+    }
     const turnIndex = app.conversation.length / 2;
     const isFirstTurn = app.conversation.length === 0;
+
+    // Conversation language tracking. On the first turn, snapshot the current preference.
+    // On every subsequent turn, detect a change and surface it to the model as a context note.
+    const currentDialect = app.getCurrentDialect?.() ?? "fr";
+    let dialectChangeNote = null;
+    let previousDialect = null;
+    if (isFirstTurn) {
+      app.setConversationDialect?.(currentDialect);
+    } else {
+      const stored = app.getConversationDialect?.();
+      if (stored && stored !== currentDialect) {
+        previousDialect = stored;
+        dialectChangeNote = `[Changement de langue : ${stored} → ${currentDialect}. À partir de maintenant, adapte la langue de tes réponses${currentDialect === "fr" ? " (français standard, sans terme vernaculaire forcé)" : currentDialect === "rcf" ? " (créole réunionnais — kréol rénioné — utilise name_local pour les maladies et traitements)" : currentDialect === "gcf" ? " (créole antillais — utilise name_local pour les maladies et traitements)" : ` (code ${currentDialect})`}.]`;
+        app.setConversationDialect?.(currentDialect);
+      }
+    }
 
     const userContent = [];
     const userDisplay = !userInput
@@ -212,10 +522,20 @@ Mode de conduite : ${bio}`;
         text: ctx + "\n\nDémarrons. Identifie ce qu'on voit ou propose des actions selon le contexte.",
       });
     } else {
-      const text =
-        userInput.kind === "action"
+      // Subsequent turn: attach any photos the action handler delivered, then the text.
+      if (userInput?.attachPhotos?.length) {
+        for (const p of userInput.attachPhotos) {
+          userContent.push({
+            type: "image",
+            source: { type: "base64", media_type: p.mime, data: p.b64 },
+          });
+        }
+      }
+      const baseText =
+        userInput?.kind === "action"
           ? `[Action choisie : ${userInput.id}] — ${userInput.label}`
-          : userInput.text;
+          : userInput?.text || "(continuer)";
+      const text = dialectChangeNote ? `${dialectChangeNote}\n\n${baseText}` : baseText;
       userContent.push({ type: "text", text });
     }
 
@@ -223,10 +543,19 @@ Mode de conduite : ${bio}`;
       role: "user",
       content: isFirstTurn
         ? "(contexte initial + photos)"
-        : userInput.kind === "action"
+        : userInput?.kind === "action"
           ? `[${userInput.id}]`
-          : userInput.text,
+          : userInput?.text || "(continuer)",
       display: userDisplay,
+      // First turn bundles all current photos with the context block; subsequent turns
+      // only attach the explicit composer/action photos. Track both so the chat strip
+      // shows the right thumbnails.
+      attachPhotoIds: isFirstTurn
+        ? app.photos.map((p) => p.id)
+        : userInput?.attachPhotos?.map((p) => p.id) || [],
+      // Snapshot of the dialect under which this turn was sent + previous dialect if changed.
+      dialect: currentDialect,
+      dialectChangedFrom: previousDialect,
       turn: turnIndex,
     });
     chatBusy = true;
@@ -235,7 +564,23 @@ Mode de conduite : ${bio}`;
 
     const apiMessages = app.conversation.map((m, i) => {
       if (m.role === "user" && i === 0) return { role: "user", content: userContent };
-      if (m.role === "user") return { role: "user", content: [{ type: "text", text: m.content }] };
+      if (m.role === "user") {
+        const content = [];
+        // Re-attach any photos referenced by this turn (skipped if the user has since deleted them).
+        if (m.attachPhotoIds?.length) {
+          for (const id of m.attachPhotoIds) {
+            const p = app.photos.find((x) => x.id === id);
+            if (p) {
+              content.push({
+                type: "image",
+                source: { type: "base64", media_type: p.mime, data: p.b64 },
+              });
+            }
+          }
+        }
+        content.push({ type: "text", text: m.content });
+        return { role: "user", content };
+      }
       return { role: "assistant", content: [{ type: "text", text: m.raw || m.message || "" }] };
     });
 
@@ -263,6 +608,7 @@ Mode de conduite : ${bio}`;
       const r = await fetch(url, { method: "POST", headers, body: payload });
       const j = await r.json();
       if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+      app.onUsage?.(j.usage, ANTHROPIC_MODEL);
       const rawText = j.content?.[0]?.text || "";
       document.getElementById("raw").textContent = rawText;
       const parsed = robustParseJson(rawText);
@@ -294,6 +640,7 @@ Mode de conduite : ${bio}`;
         app.renderMetrics(analysisCombined);
         if (analysisCombined.diseases) {
           app.renderDiseases(analysisCombined.diseases, {
+            photos: app.photos,
             t_per_ha: analysisCombined.yield?.estimated_t_per_ha,
             price_eur_per_kg: analysisCombined.market?.indicative_price_eur_per_kg,
             total_area_ha: analysisCombined.parcels_summary?.total_area_ha,
@@ -337,5 +684,23 @@ Mode de conduite : ${bio}`;
     return chatBusy;
   }
 
-  return { renderChat, sendTurn, resetChat, ACTION_HANDLERS, setFreeTextOpen, isChatBusy };
+  // Drain any pending composer attachments — called by main.js when the send button fires.
+  function takeComposerAttachments() {
+    const drained = composerPhotos;
+    composerPhotos = [];
+    renderComposerAttachments();
+    return drained;
+  }
+
+  return {
+    renderChat,
+    sendTurn,
+    resetChat,
+    ACTION_HANDLERS,
+    setFreeTextOpen,
+    isChatBusy,
+    composerPickPhoto,
+    takeComposerAttachments,
+    renderComposerAttachments,
+  };
 }

@@ -284,12 +284,14 @@ export function createDbx(app) {
         locSource: p.locSource,
         direction: p.direction,
         takenAt: p.takenAt ? p.takenAt.toISOString() : null,
+        takenAtSource: p.takenAtSource || null,
         representative: p.representative ?? null,
         tags: p.tags || null,
         file: `photos/${p.id}.${(p.mime || "image/jpeg").split("/")[1] || "jpg"}`,
       })),
       analysis: state.lastAnalysis,
       conversation: state.lastConversation || [],
+      conversation_dialect: app.getConversationDialect?.() || null,
       user_profile: state.lastUserProfile || null,
     };
     try {
@@ -469,6 +471,7 @@ export function createDbx(app) {
             locSource: meta.locSource,
             direction: meta.direction,
             takenAt: meta.takenAt ? new Date(meta.takenAt) : null,
+            takenAtSource: meta.takenAtSource || (meta.takenAt ? "exif" : null),
             representative: meta.representative ?? null,
             tags: meta.tags || null,
             exifFound: true,
@@ -496,6 +499,7 @@ export function createDbx(app) {
         app.renderMetrics(app.getAnalysisCombined());
         if (app.getAnalysisCombined().diseases) {
           app.renderDiseases(app.getAnalysisCombined().diseases, {
+            photos: app.photos,
             t_per_ha: app.getAnalysisCombined().yield?.estimated_t_per_ha,
             price_eur_per_kg: app.getAnalysisCombined().market?.indicative_price_eur_per_kg,
             total_area_ha: app.getAnalysisCombined().parcels_summary?.total_area_ha,
@@ -510,6 +514,15 @@ export function createDbx(app) {
         app.conversation.push(...manifest.conversation);
         state.lastConversation = manifest.conversation;
       }
+      // Restore conversation-level dialect (if absent, falls back to the dialect of the
+      // last turn that snapshotted one; older manifests stay at null and the next user
+      // turn will resnapshot from the preference select).
+      if (manifest.conversation_dialect) {
+        app.setConversationDialect?.(manifest.conversation_dialect);
+      } else if (Array.isArray(manifest.conversation)) {
+        const lastDialect = [...manifest.conversation].reverse().find((m) => m.dialect)?.dialect;
+        if (lastDialect) app.setConversationDialect?.(lastDialect);
+      }
       if (manifest.user_profile) {
         for (const k of Object.keys(app.userProfile)) delete app.userProfile[k];
         Object.assign(app.userProfile, manifest.user_profile);
@@ -522,12 +535,14 @@ export function createDbx(app) {
       state.cropCode = cropCode;
       localStorage.setItem(LS.session, sid);
       localStorage.setItem(LS.crop, cropCode);
-      analyzeBtn.disabled = app.photos.length === 0;
+      app.analyzeBtn.disabled = app.photos.length === 0;
       app.updateAnalyzeAvailability();
-      // Center the app.map on what we just loaded.
-      if (app.selectedParcels.size > 0) fitToSelectedParcels();
+      // Center the map on what we just loaded.
+      if (app.selectedParcels.size > 0) app.fitToSelectedParcels();
       else if (app.getCurrentAddress()?.lat)
         app.map.setView([app.getCurrentAddress().lat, app.getCurrentAddress().lon], 15);
+      // Now that the view is correct, install the basemap (was deferred at boot).
+      window.__initBasemap?.();
       const cm = app.cropMeta(cropCode);
       renderPanel(`Culture ${cm.emoji || ""} ${cm.fr || cropCode} — ${sid} rechargée.`);
       setSaveStatus("saved");
@@ -562,12 +577,14 @@ export function createDbx(app) {
     if (!state.enabled) {
       state.suspendSave = false;
       app.setPendingDbxLoad(false);
+      window.__initBasemap?.();
       window.__hideLoading?.();
       return;
     }
     if (!state.token) {
       state.suspendSave = false;
       app.setPendingDbxLoad(false);
+      window.__initBasemap?.();
       window.__setLoadingMsg?.("Configurez un crop");
       setTimeout(() => window.__hideLoading?.(), 1200);
       renderPanel("Non connecté — connectez Dropbox pour sauvegarder.");
@@ -604,6 +621,7 @@ export function createDbx(app) {
     } finally {
       // Always release the gate so subsequent user actions (move/click) behave normally.
       app.setPendingDbxLoad(false);
+      window.__initBasemap?.();
     }
   }
   // Fire after the rest of the script has set up event listeners + the app.map is ready.

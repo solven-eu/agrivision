@@ -39,7 +39,57 @@ body {
   display: none;
 }
 
-/* ===== Mobile (≤768px): sidebar becomes a bottom drawer ===== */
+/* ===== Speech mic button — pulses red while recording ===== */
+#chat-mic.recording {
+  background: var(--bad);
+  color: #fff;
+  border-color: var(--bad);
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+@keyframes mic-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.6);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(248, 113, 113, 0);
+  }
+}
+
+/* ===== Camera capture button (prominent green) ===== */
+button.primary-capture {
+  background: var(--accent);
+  color: #0a0e13;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 10px 14px;
+  border-radius: 8px;
+  flex: 1;
+}
+
+/* ===== FAB (floating action button) — hidden on desktop ===== */
+#fab {
+  position: fixed;
+  right: 16px;
+  bottom: 80px;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #0a0e13;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  display: none;
+  z-index: 999;
+  transition: transform 0.15s;
+}
+#fab:active {
+  transform: scale(0.92);
+}
+
+/* ===== Mobile (≤768px): sidebar becomes a bottom drawer with snap points ===== */
 @media (max-width: 768px) {
   #app {
     grid-template-columns: 1fr;
@@ -55,39 +105,58 @@ body {
     right: 0;
     bottom: 0;
     top: auto;
-    height: 45vh;
-    max-height: 70vh;
+    height: 92vh;
+    max-height: 92vh;
     border-right: none;
     border-top: 1px solid var(--border);
     border-radius: 16px 16px 0 0;
     padding: 8px 14px 16px;
-    transform: translateY(calc(100% - 60px));
-    transition: transform 0.25s ease-out;
-    z-index: 1000;
+    /* Default: peek (just the handle visible) */
+    transform: translateY(calc(100% - 50px));
+    transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+    /* Above Leaflet controls (~1000) so the layer/zoom control sits behind the drawer. */
+    z-index: 1100;
     box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.4);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* Three snap points */
+  #side.peek {
+    transform: translateY(calc(100% - 50px));
+  }
+  #side.half {
+    transform: translateY(50%);
+  }
+  #side.full {
+    transform: translateY(0);
   }
   #side.open {
     transform: translateY(0);
-  }
+  } /* legacy */
+
   #drawer-handle {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 4px 0 8px;
-    cursor: pointer;
+    cursor: grab;
     user-select: none;
     position: sticky;
-    top: 0;
+    top: -8px;
     background: var(--panel);
     z-index: 1;
+    touch-action: none;
+  }
+  #drawer-handle:active {
+    cursor: grabbing;
   }
   #drawer-handle::before {
     content: "";
     display: block;
-    width: 40px;
-    height: 4px;
+    width: 44px;
+    height: 5px;
     background: var(--muted);
-    border-radius: 2px;
+    border-radius: 3px;
     margin: 0 auto;
     position: absolute;
     left: 50%;
@@ -104,14 +173,137 @@ body {
     font-size: 14px;
     color: var(--muted);
   }
-  /* Larger touch targets on mobile */
+
+  /* FAB visible on mobile */
+  #fab {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Bigger touch targets */
   button,
   .chip {
-    min-height: 32px;
+    min-height: 40px;
   }
+  button {
+    padding: 10px 14px;
+  }
+  .chip {
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+  input[type="text"],
+  input[type="password"],
+  select,
+  textarea {
+    font-size: 16px; /* prevent iOS zoom on focus */
+    padding: 12px 10px;
+  }
+
+  /* Photo card upgrades */
+  .photo-card {
+    padding: 10px;
+    gap: 12px;
+  }
+  .photo-card .photo-slot {
+    width: 128px;
+  }
+  .photo-card img {
+    width: 128px;
+    height: 128px;
+  }
+  .photo-card .meta {
+    font-size: 12px;
+  }
+  .photo-card .meta button {
+    font-size: 12px;
+    padding: 6px 10px;
+    min-height: 34px;
+  }
+  .photo-card .del {
+    width: 28px;
+    height: 28px;
+    font-size: 16px;
+  }
+
+  /* Map controls — smaller on mobile */
+  .sun-compass {
+    width: 56px;
+    height: 56px;
+  }
+  .sun-compass .card {
+    font-size: 8px;
+  }
+  .sun-meta {
+    font-size: 9px;
+    padding: 1px 4px;
+  }
+  .lock-hint {
+    font-size: 11px;
+    padding: 5px 8px;
+  }
+  .select-hint {
+    font-size: 12px;
+    padding: 8px 12px;
+  }
+
+  /* Title bar */
   h1 {
     font-size: 14px;
+    margin-bottom: 8px;
   }
+  h2 {
+    font-size: 11px;
+    margin: 12px 0 6px;
+  }
+
+  /* Chat actions: wrap nicely on small screens */
+  .chat-action {
+    font-size: 12px;
+    padding: 8px 12px;
+    min-height: 36px;
+  }
+  .chat-msg {
+    max-width: 88%;
+    font-size: 13px;
+  }
+}
+
+/* On very small phones, hide the moon glyph in the compass to save space */
+@media (max-width: 480px) {
+  .sun-compass .moon {
+    display: none;
+  }
+}
+
+/* ===== Leaner UX: collapsible advanced sections ===== */
+/* Sections that are advanced/optional collapse by default to reduce noise for new users. */
+.advanced > summary {
+  cursor: pointer;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  margin: 16px 0 6px;
+  list-style: none;
+  padding: 4px 0;
+}
+.advanced > summary::-webkit-details-marker {
+  display: none;
+}
+.advanced > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  width: 12px;
+  color: var(--muted);
+  transition: transform 0.15s;
+}
+.advanced[open] > summary::before {
+  content: "▾ ";
+}
+.advanced > summary:hover {
+  color: var(--text);
 }
 h1 {
   font-size: 16px;
@@ -353,23 +545,35 @@ a {
 }
 .photo-card {
   display: flex;
-  gap: 6px;
+  gap: 10px;
   background: var(--panel2);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px;
-  align-items: center;
+  align-items: stretch;
+  width: 100%;
+  box-sizing: border-box;
+}
+.photo-card .photo-slot {
+  flex: 0 0 auto;
+  width: 96px;
+  align-self: stretch;
 }
 .photo-card img {
-  width: 48px;
-  height: 48px;
+  width: 96px;
+  height: 96px;
   object-fit: cover;
   border-radius: 4px;
+  display: block;
 }
 .photo-card .meta {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--muted);
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .photo-card .meta button {
   font-size: 10px;
@@ -536,6 +740,14 @@ a {
   font-style: italic;
   padding: 4px 10px;
 }
+.parcel-emoji-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  pointer-events: none;
+  user-select: none;
+}
 .parcel-emoji {
   font-size: 22px;
   line-height: 28px;
@@ -545,6 +757,20 @@ a {
     0 0 6px #000;
   pointer-events: none;
   user-select: none;
+}
+.parcel-bio {
+  font-size: 14px;
+  line-height: 18px;
+  background: rgba(74, 222, 128, 0.92);
+  color: #062014;
+  border-radius: 50%;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #0a0e13;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
 }
 #loading-overlay {
   position: fixed;

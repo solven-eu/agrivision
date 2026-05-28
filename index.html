@@ -12,9 +12,109 @@
   </head>
   <body>
     <div id="app">
+      <div
+        id="tutorial-modal"
+        style="
+          display: none;
+          position: fixed;
+          inset: 0;
+          z-index: 10001;
+          background: rgba(0, 0, 0, 0.75);
+          align-items: center;
+          justify-content: center;
+          padding: 20px;
+        "
+      >
+        <div
+          style="
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 20px;
+            max-width: 460px;
+            width: 100%;
+            color: var(--text);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+          "
+        >
+          <div style="display: flex; justify-content: space-between; align-items: center">
+            <h2 style="margin: 0; font-size: 18px">Bienvenue dans AgriVision RE 🇷🇪</h2>
+            <button
+              id="tuto-skip"
+              type="button"
+              style="
+                background: transparent;
+                border: 0;
+                color: var(--muted);
+                font-size: 12px;
+                cursor: pointer;
+                text-decoration: underline;
+              "
+            >
+              Passer
+            </button>
+          </div>
+          <div
+            id="tuto-page-1"
+            class="tuto-page"
+            style="display: block; padding: 14px; background: var(--panel2); border-radius: 6px"
+          >
+            <div style="font-size: 32px; text-align: center">🗺️</div>
+            <h3 style="margin: 4px 0 6px; text-align: center">1. Repérer la parcelle</h3>
+            <p style="margin: 0; font-size: 13px; line-height: 1.5">
+              Tapez une adresse ou laissez la géolocalisation centrer la carte. Cliquez sur une parcelle
+              agricole (RPG) pour la sélectionner. Plusieurs parcelles possibles.
+            </p>
+          </div>
+          <div
+            id="tuto-page-2"
+            class="tuto-page"
+            style="display: none; padding: 14px; background: var(--panel2); border-radius: 6px"
+          >
+            <div style="font-size: 32px; text-align: center">📷</div>
+            <h3 style="margin: 4px 0 6px; text-align: center">2. Photographier le champ</h3>
+            <p style="margin: 0; font-size: 13px; line-height: 1.5">
+              Prenez plusieurs photos avec votre téléphone : une vue large + un gros plan d'une feuille ou
+              d'un fruit. Le GPS et l'orientation sont lus automatiquement. Les photos restent locales tant
+              que vous ne lancez pas l'analyse.
+            </p>
+          </div>
+          <div
+            id="tuto-page-3"
+            class="tuto-page"
+            style="display: none; padding: 14px; background: var(--panel2); border-radius: 6px"
+          >
+            <div style="font-size: 32px; text-align: center">💬</div>
+            <h3 style="margin: 4px 0 6px; text-align: center">3. Discuter avec l'IA</h3>
+            <p style="margin: 0; font-size: 13px; line-height: 1.5">
+              Cliquez sur "Démarrer l'analyse". L'IA identifie la culture, le stade, les maladies probables,
+              propose des traitements et chiffre leur rentabilité. Vous pouvez continuer la conversation,
+              joindre de nouvelles photos, et tout sauver sur votre Dropbox.
+            </p>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px">
+            <div id="tuto-dots" style="display: flex; gap: 4px"></div>
+            <div style="display: flex; gap: 6px">
+              <button
+                id="tuto-prev"
+                class="secondary"
+                type="button"
+                style="font-size: 12px; padding: 6px 12px"
+              >
+                ← Précédent
+              </button>
+              <button id="tuto-next" type="button" style="font-size: 12px; padding: 6px 12px">
+                Suivant →
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
       <aside id="side">
         <div id="drawer-handle"><span id="drawer-title">Outils</span><span id="drawer-chevron">▲</span></div>
-        <h1>
+        <h1 style="position: relative">
           AgriVision RE <span title="La Réunion">🇷🇪</span>
           <span
             id="ver"
@@ -26,7 +126,127 @@
               font-family: monospace;
             "
           ></span>
+          <button
+            id="app-menu-btn"
+            type="button"
+            aria-label="Préférences"
+            title="Préférences"
+            style="
+              position: absolute;
+              top: 0;
+              right: 0;
+              background: transparent;
+              border: 1px solid var(--border);
+              color: var(--text);
+              border-radius: 6px;
+              padding: 4px 8px;
+              cursor: pointer;
+              font-size: 16px;
+              line-height: 1;
+            "
+          >
+            ☰
+          </button>
         </h1>
+        <div
+          id="app-menu-panel"
+          style="
+            display: none;
+            position: absolute;
+            top: 38px;
+            right: 12px;
+            z-index: 999;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px;
+            min-width: 240px;
+            max-width: min(360px, 90vw);
+            max-height: 70vh;
+            overflow-y: auto;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+          "
+        >
+          <div style="font-size: 11px; color: var(--muted); margin-bottom: 4px">Préférences</div>
+          <label for="dialect" style="display: block; margin-top: 4px; font-size: 12px; color: var(--muted)"
+            >Langue</label
+          >
+          <select
+            id="dialect"
+            style="
+              width: 100%;
+              padding: 6px;
+              border-radius: 6px;
+              border: 1px solid var(--border);
+              background: var(--panel2);
+              color: var(--text);
+              font-size: 12px;
+              margin-top: 2px;
+            "
+          >
+            <option value="fr">Français</option>
+            <option value="rcf">Créole réunionnais (kréol rénioné)</option>
+            <option value="gcf">Créole antillais</option>
+          </select>
+          <label
+            for="labor-rate"
+            style="display: block; margin-top: 10px; font-size: 12px; color: var(--muted)"
+            >Taux horaire main d'œuvre (€/h)</label
+          >
+          <input
+            id="labor-rate"
+            type="number"
+            min="0"
+            step="0.5"
+            placeholder="Auto (≈25 métro / 22 DOM)"
+            style="
+              width: 100%;
+              padding: 6px;
+              border-radius: 6px;
+              border: 1px solid var(--border);
+              background: var(--panel2);
+              color: var(--text);
+              font-size: 12px;
+              margin-top: 2px;
+              box-sizing: border-box;
+            "
+          />
+          <div class="small" style="color: var(--muted); margin-top: 2px">
+            Surcharge le tarif horaire renvoyé par l'IA pour tous les calculs.
+          </div>
+          <div
+            style="
+              margin-top: 12px;
+              padding-top: 10px;
+              border-top: 1px solid var(--border);
+              font-size: 11px;
+              color: var(--muted);
+            "
+          >
+            Cloud (Dropbox)
+          </div>
+          <div id="dbx-panel" class="small" style="margin-top: 4px">
+            Désactivé : configure <code>DROPBOX_APP_KEY</code> en haut du script.
+          </div>
+          <div
+            style="
+              margin-top: 12px;
+              padding-top: 10px;
+              border-top: 1px solid var(--border);
+              display: flex;
+              justify-content: flex-end;
+            "
+          >
+            <button
+              id="show-tutorial-btn"
+              type="button"
+              class="secondary"
+              style="font-size: 11px; padding: 4px 8px"
+            >
+              ❓ Revoir l'intro
+            </button>
+          </div>
+        </div>
 
         <h2>1. Adresse</h2>
         <div class="row">
@@ -35,148 +255,161 @@
         </div>
         <div id="status"></div>
 
-        <h2>2. Filtrer cultures (RPG)</h2>
-        <div class="small" style="margin-bottom: 6px">
-          Tout est affiché par défaut. Cliquer pour exclure/inclure.
-        </div>
-        <div class="chips" id="chips"></div>
-        <div style="margin-top: 6px; display: flex; gap: 6px">
-          <button class="secondary" id="chips-all" style="font-size: 11px; padding: 4px 8px">Tout</button>
-          <button class="secondary" id="chips-none" style="font-size: 11px; padding: 4px 8px">Aucun</button>
-        </div>
-        <details style="margin-top: 6px">
-          <summary>Légende des couleurs (RPG)</summary>
-          <div style="margin-top: 6px; display: flex; flex-direction: column; gap: 4px; font-size: 11px">
-            <div style="display: flex; align-items: center; gap: 6px">
-              <span
-                style="
-                  display: inline-block;
-                  width: 14px;
-                  height: 14px;
-                  background: #fdcd80;
-                  border: 1px solid var(--border);
-                  border-radius: 2px;
-                "
-              ></span
-              >Terres arables (céréales, oléagineux, maïs…)
-            </div>
-            <div style="display: flex; align-items: center; gap: 6px">
-              <span
-                style="
-                  display: inline-block;
-                  width: 14px;
-                  height: 14px;
-                  background: #94c47d;
-                  border: 1px solid var(--border);
-                  border-radius: 2px;
-                "
-              ></span
-              >Prairies permanentes
-            </div>
-            <div style="display: flex; align-items: center; gap: 6px">
-              <span
-                style="
-                  display: inline-block;
-                  width: 14px;
-                  height: 14px;
-                  background: #b48ec4;
-                  border: 1px solid var(--border);
-                  border-radius: 2px;
-                "
-              ></span
-              >Cultures permanentes (vignes, vergers, canne…)
-            </div>
-            <div class="small" style="margin-top: 4px">
-              Sur les parcelles sélectionnées, un emoji indique la culture précise.
-            </div>
+        <details class="advanced">
+          <summary>2. Filtrer cultures (RPG)</summary>
+          <div class="small" style="margin-bottom: 6px">
+            Tout est affiché par défaut. Cliquer pour exclure/inclure.
           </div>
+          <div class="chips" id="chips"></div>
+          <div style="margin-top: 6px; display: flex; gap: 6px">
+            <button class="secondary" id="chips-all" style="font-size: 11px; padding: 4px 8px">Tout</button>
+            <button class="secondary" id="chips-none" style="font-size: 11px; padding: 4px 8px">Aucun</button>
+          </div>
+          <details style="margin-top: 6px">
+            <summary>Légende des couleurs (RPG)</summary>
+            <div style="margin-top: 6px; display: flex; flex-direction: column; gap: 4px; font-size: 11px">
+              <div style="display: flex; align-items: center; gap: 6px">
+                <span
+                  style="
+                    display: inline-block;
+                    width: 14px;
+                    height: 14px;
+                    background: #fdcd80;
+                    border: 1px solid var(--border);
+                    border-radius: 2px;
+                  "
+                ></span
+                >Terres arables (céréales, oléagineux, maïs…)
+              </div>
+              <div style="display: flex; align-items: center; gap: 6px">
+                <span
+                  style="
+                    display: inline-block;
+                    width: 14px;
+                    height: 14px;
+                    background: #94c47d;
+                    border: 1px solid var(--border);
+                    border-radius: 2px;
+                  "
+                ></span
+                >Prairies permanentes
+              </div>
+              <div style="display: flex; align-items: center; gap: 6px">
+                <span
+                  style="
+                    display: inline-block;
+                    width: 14px;
+                    height: 14px;
+                    background: #b48ec4;
+                    border: 1px solid var(--border);
+                    border-radius: 2px;
+                  "
+                ></span
+                >Cultures permanentes (vignes, vergers, canne…)
+              </div>
+              <div class="small" style="margin-top: 4px">
+                Sur les parcelles sélectionnées, un emoji indique la culture précise.
+              </div>
+            </div>
+          </details>
+          <div class="small" style="margin-top: 6px">Cliquer une parcelle sur la carte pour ses infos.</div>
         </details>
-        <div class="small" style="margin-top: 6px">Cliquer une parcelle sur la carte pour ses infos.</div>
         <div id="parcel-info"></div>
 
-        <h2>3. Photos de la culture</h2>
-        <div class="small">Plusieurs photos = meilleure analyse (vue large + gros plan feuille/fruit).</div>
-        <div style="margin-top: 8px"><input id="photo" type="file" accept="image/*" multiple /></div>
-        <div id="thumbs" style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px"></div>
-        <div style="margin-top: 8px; display: flex; gap: 6px; align-items: center">
-          <label style="margin: 0; flex: 0 0 auto">Langue :</label>
-          <select
-            id="dialect"
-            style="
-              flex: 1;
-              padding: 6px;
-              border-radius: 6px;
-              border: 1px solid var(--border);
-              background: var(--panel2);
-              color: var(--text);
-              font-size: 12px;
-            "
-          >
-            <option value="fr">Français</option>
-            <option value="rcf">Créole réunionnais (kréol rénioné)</option>
-            <option value="gcf">Créole antillais</option>
-          </select>
-        </div>
-        <div style="margin-top: 8px">
-          <div
-            id="chat-log"
-            style="
-              display: flex;
-              flex-direction: column;
-              gap: 8px;
-              max-height: 380px;
-              overflow-y: auto;
-              padding: 6px;
-              background: var(--panel2);
-              border: 1px solid var(--border);
-              border-radius: 6px;
-              font-size: 12px;
-            "
-          ></div>
-          <div id="chat-actions" style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px"></div>
-          <div id="chat-input-row" style="display: flex; gap: 6px; margin-top: 6px; display: none">
-            <input
-              id="chat-text"
-              type="text"
-              placeholder="Posez une question…"
-              style="flex: 1; font-size: 12px; padding: 6px 8px"
-            />
-            <button id="chat-send" style="padding: 6px 12px">→</button>
+        <details class="advanced" id="photos-section" open>
+          <summary>📷 <span id="photos-summary-count">Photos de la culture</span></summary>
+          <div class="small" style="margin-top: 6px">
+            Plusieurs photos = meilleure analyse (vue large + gros plan feuille/fruit).
           </div>
-          <div style="display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap">
-            <button id="chat-start" disabled>💬 Démarrer</button>
-            <button id="report-btn" disabled>📊 Rapport</button>
-            <button id="chat-reset" class="secondary" style="font-size: 11px; padding: 6px 10px">
-              Recommencer
-            </button>
-            <button
-              id="analyze-pro"
-              class="secondary"
-              disabled
-              title="Plan Pro (à venir) — Sonnet 4.5 + Opus pour des analyses plus fines."
-              style="font-size: 11px; padding: 6px 10px; opacity: 0.6"
-            >
-              🌟 Pro
-            </button>
+          <div style="margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap">
+            <button id="photo-camera" class="primary-capture" type="button">📷 Capturer</button>
+            <button id="photo-file" class="secondary" type="button">🖼 Choisir un fichier</button>
           </div>
-        </div>
+          <input id="photo" type="file" accept="image/*" multiple hidden />
+          <input id="photo-cam" type="file" accept="image/*" capture="environment" hidden />
+          <div id="thumbs" style="display: flex; flex-direction: column; gap: 6px; margin-top: 8px"></div>
+        </details>
+        <details class="advanced" id="chat-section">
+          <summary>💬 Conversation IA</summary>
+          <div style="margin-top: 8px">
+            <div
+              id="chat-log"
+              style="
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                max-height: 380px;
+                overflow-y: auto;
+                padding: 6px;
+                background: var(--panel2);
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                font-size: 12px;
+              "
+            ></div>
+            <div id="chat-actions" style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px"></div>
+            <div id="chat-input-row" style="display: none; flex-direction: column; gap: 4px; margin-top: 6px">
+              <div id="chat-attachments" style="display: none; flex-wrap: wrap; gap: 4px"></div>
+              <div style="display: flex; gap: 6px">
+                <input
+                  id="chat-text"
+                  type="text"
+                  placeholder="Question, commentaire, ou les deux…"
+                  style="flex: 1; font-size: 12px; padding: 6px 8px"
+                />
+                <button
+                  id="chat-attach"
+                  class="secondary"
+                  title="Joindre une photo"
+                  style="padding: 6px 10px"
+                >
+                  📎
+                </button>
+                <button id="chat-mic" class="secondary" title="Dicter (5 s max)" style="padding: 6px 10px">
+                  🎤
+                </button>
+                <button id="chat-send" style="padding: 6px 12px">→</button>
+              </div>
+            </div>
+            <div style="display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap">
+              <button id="chat-start" disabled>💬 Démarrer l'analyse</button>
+              <button id="report-btn" disabled>📊 Rapport complet</button>
+              <button
+                id="chat-reset"
+                class="secondary"
+                style="font-size: 11px; padding: 6px 10px"
+                title="Efface complètement la conversation et l'analyse en cours."
+              >
+                🗑 Effacer
+              </button>
+              <button
+                id="analyze-pro"
+                class="secondary"
+                disabled
+                title="Plan Pro (à venir) — Sonnet 4.5 + Opus pour des analyses plus fines."
+                style="font-size: 11px; padding: 6px 10px; opacity: 0.6"
+              >
+                🌟 Pro
+              </button>
+            </div>
+          </div>
+        </details>
         <div id="analyze-status" class="small" style="margin-top: 6px"></div>
 
-        <h2>4. Grille normalisée</h2>
-        <div class="grid" id="metrics"></div>
-
-        <h2>5. Maladies & traitements</h2>
-        <div id="diseases"><div class="small">Analyser une photo pour obtenir le diagnostic.</div></div>
-
-        <details>
-          <summary>JSON brut</summary>
-          <pre id="raw"></pre>
+        <details class="advanced" id="grid-section">
+          <summary>4. Grille normalisée</summary>
+          <div class="grid" id="metrics"></div>
         </details>
 
-        <h2>☁ Dropbox</h2>
-        <div id="dbx-panel" class="small">
-          Désactivé : configure <code>DROPBOX_APP_KEY</code> en haut du script.
-        </div>
+        <details class="advanced" id="diseases-section">
+          <summary>5. Maladies & traitements</summary>
+          <div id="diseases"><div class="small">Analyser une photo pour obtenir le diagnostic.</div></div>
+        </details>
+
+        <details class="advanced">
+          <summary>JSON brut (debug)</summary>
+          <pre id="raw"></pre>
+        </details>
 
         <div
           id="debug-panel"
@@ -203,6 +436,27 @@
             >
               Vider localStorage
             </button>
+            <button
+              class="secondary"
+              id="dbg-export-images"
+              style="font-size: 11px; padding: 4px 8px"
+              title="Dumps every image URL the fallback chain has resolved — paste into catalog.json"
+            >
+              📋 Catalogue d'images
+            </button>
+          </div>
+          <div
+            id="token-badge"
+            class="small"
+            style="margin-top: 8px; padding: 6px 8px; background: var(--panel2); border-radius: 4px"
+          >
+            <span id="token-summary">Tokens : aucun appel encore</span>
+            <span id="token-warning" style="color: var(--warn); margin-left: 6px"></span>
+            <div
+              id="token-details"
+              class="small"
+              style="margin-top: 4px; color: var(--muted); display: none"
+            ></div>
           </div>
           <pre
             id="dbg-output"
@@ -229,6 +483,9 @@
         </div>
       </aside>
       <div id="map"></div>
+
+      <!-- Floating Action Button — visible on mobile only. Defaults to camera capture. -->
+      <button id="fab" type="button" aria-label="Action principale">📷</button>
     </div>
 
     <div id="loading-overlay" class="show">
