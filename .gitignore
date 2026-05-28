@@ -1,0 +1,29 @@
+# Node
+node_modules/
+
+# Wrangler / Cloudflare Worker local state
+worker/.dev.vars
+worker/.wrangler/
+
+# User photos / scratch images at repo root (not source)
+*.jpg
+*.jpeg
+*.png
+*.heic
+*.heif
+# Allow committed app assets if they live in /assets/ later
+!icon.svg
+!assets/**
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Local test artifacts
+/tmp/
+.cache/

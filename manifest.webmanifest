@@ -1,0 +1,20 @@
+{
+  "name": "AgriVision FR",
+  "short_name": "AgriVision",
+  "description": "Identification de cultures, parcelles RPG, diagnostic phytosanitaire à partir de photos terrain.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f1419",
+  "theme_color": "#4ade80",
+  "lang": "fr",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

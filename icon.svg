@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0f1419"/>
+  <g transform="translate(60 60)">
+    <!-- field grid -->
+    <rect x="0" y="180" width="392" height="212" rx="20" fill="#1a2128" stroke="#2f3a45" stroke-width="3"/>
+    <path d="M0 220 L392 220 M0 270 L392 270 M0 320 L392 320 M0 370 L392 370" stroke="#2f3a45" stroke-width="2"/>
+    <!-- leaf -->
+    <path d="M196 30 C 110 30 70 120 80 200 C 80 200 160 180 230 110 C 280 60 196 30 196 30 Z" fill="#4ade80"/>
+    <path d="M196 30 C 220 80 222 150 196 200" fill="none" stroke="#0a0e13" stroke-width="6" stroke-linecap="round"/>
+  </g>
+</svg>

@@ -1,0 +1,1996 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AgriVision — crop fields + photo analysis</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="icon" href="icon.svg" type="image/svg+xml" />
+<meta name="theme-color" content="#4ade80" />
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a2128;
+    --panel2: #232b34;
+    --border: #2f3a45;
+    --text: #e6edf3;
+    --muted: #8b98a5;
+    --accent: #4ade80;
+    --warn: #fbbf24;
+    --bad: #f87171;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  #app { display: grid; grid-template-columns: 380px 1fr; height: 100vh; }
+  #side { background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto; padding: 16px; }
+  #map { height: 100%; }
+  h1 { font-size: 16px; margin: 0 0 12px; letter-spacing: 0.5px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 16px 0 6px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  input[type="text"], input[type="password"], textarea {
+    width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--panel2); color: var(--text); font-size: 13px; font-family: inherit;
+  }
+  input[type="file"] { color: var(--muted); font-size: 12px; }
+  button {
+    background: var(--accent); color: #0a0e13; border: none; padding: 8px 12px; border-radius: 6px;
+    font-weight: 600; cursor: pointer; font-size: 13px;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: var(--panel2); color: var(--text); border: 1px solid var(--border); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  .row > button { flex: 0 0 auto; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-size: 11px; padding: 4px 8px; border-radius: 12px; border: 1px solid var(--border);
+    background: var(--panel2); cursor: pointer; user-select: none;
+  }
+  .chip.on { background: var(--accent); color: #0a0e13; border-color: var(--accent); }
+  #status { font-size: 12px; color: var(--muted); margin-top: 8px; min-height: 16px; }
+  #parcel-info {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; font-size: 12px; margin-top: 8px; display: none;
+  }
+  #parcel-info dt { color: var(--muted); }
+  #parcel-info dd { margin: 0 0 6px; font-weight: 600; }
+  .grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px;
+  }
+  .cell {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .cell .k { font-size: 10px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.5px; }
+  .cell .v { font-size: 14px; font-weight: 600; margin-top: 2px; }
+  .cell.full { grid-column: 1 / -1; }
+  .bar { height: 4px; background: var(--border); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+  .bar > div { height: 100%; background: var(--accent); }
+  .bar.warn > div { background: var(--warn); }
+  .bar.bad > div { background: var(--bad); }
+  details { background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-top: 8px; }
+  details summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+  pre { font-size: 11px; overflow-x: auto; color: var(--muted); }
+  a { color: var(--accent); }
+  .small { font-size: 11px; color: var(--muted); }
+  .sun-compass {
+    width: 70px; height: 70px; border-radius: 50%;
+    background: rgba(15,20,25,0.85); border: 1px solid var(--border);
+    position: relative; color: var(--text); font-size: 11px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  }
+  .sun-compass .card {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    color: var(--muted); font-weight: 600; font-size: 9px;
+  }
+  .sun-compass .card.n { top: 2px; }
+  .sun-compass .card.s { bottom: 2px; }
+  .sun-compass .card.e { right: 3px; top: 50%; transform: translateY(-50%); left: auto; }
+  .sun-compass .card.w { left: 3px; top: 50%; transform: translateY(-50%); }
+  .sun-compass .sun, .sun-compass .moon {
+    position: absolute; font-size: 16px;
+    transform: translate(-50%, -50%);
+    transition: top 0.4s, left 0.4s;
+  }
+  .sun-compass .sun { text-shadow: 0 0 4px rgba(251,191,36,0.7); }
+  .sun-compass .moon { font-size: 14px; text-shadow: 0 0 4px rgba(180,200,230,0.6); }
+  .sun-compass .below { opacity: 0.35; filter: grayscale(0.6); }
+  .sun-meta {
+    margin-top: 4px; font-size: 10px; color: var(--text);
+    background: rgba(15,20,25,0.85); padding: 2px 6px; border-radius: 4px;
+    border: 1px solid var(--border); text-align: center;
+  }
+  .photo-card {
+    display: flex; gap: 6px; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px; align-items: center;
+  }
+  .photo-card img { width: 48px; height: 48px; object-fit: cover; border-radius: 4px; }
+  .photo-card .meta { font-size: 10px; color: var(--muted); flex: 1; }
+  .photo-card .meta button { font-size: 10px; padding: 2px 6px; margin-top: 2px; }
+  .photo-card .del { background: var(--bad); color: #fff; border: none; border-radius: 3px;
+    width: 18px; height: 18px; cursor: pointer; font-weight: 700; }
+  .photo-pin {
+    background: rgba(74,222,128,0.9); border: 2px solid #fff;
+    border-radius: 50%; width: 24px; height: 24px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+  }
+  .map-placing { cursor: crosshair !important; }
+  .lock-hint {
+    background: rgba(15,20,25,0.9); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 10px; font-size: 12px; font-weight: 600;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4); cursor: pointer; user-select: none;
+    transition: background 0.15s, border-color 0.15s, transform 0.15s;
+  }
+  .lock-hint.locked  { border-color: var(--warn); color: var(--warn); }
+  .lock-hint.unlocked { border-color: var(--accent); color: var(--accent); }
+  .lock-hint.flash   { transform: scale(1.08); background: var(--warn); color: #0a0e13; border-color: var(--warn); }
+  .parcel-emoji {
+    font-size: 22px; line-height: 28px; text-align: center;
+    text-shadow: 0 0 3px #000, 0 0 6px #000;
+    pointer-events: none; user-select: none;
+  }
+  .disease {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; margin-top: 6px;
+  }
+  .disease .head { display: flex; justify-content: space-between; align-items: baseline; }
+  .disease .name { font-weight: 600; font-size: 13px; }
+  .disease .sci { font-style: italic; font-size: 10px; color: var(--muted); }
+  .disease .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 6px; font-size: 11px; }
+  .disease .row2 .k { color: var(--muted); }
+  .disease .tx { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); font-size: 11px; }
+  .disease .tx h4 { margin: 0 0 4px; font-size: 10px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.5px; }
+  .disease .tx ul { margin: 0; padding-left: 14px; }
+  .disease .tx li { margin-bottom: 3px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <h1>AgriVision FR</h1>
+
+    <h2>1. Adresse</h2>
+    <div class="row">
+      <input id="addr" type="text" placeholder="ex: 12 rue de la Mairie, Saint-Émilion" />
+      <button id="go">→</button>
+    </div>
+    <div id="status"></div>
+
+    <h2>2. Filtrer cultures (RPG)</h2>
+    <div class="small" style="margin-bottom:6px">Tout est affiché par défaut. Cliquer pour exclure/inclure.</div>
+    <div class="chips" id="chips"></div>
+    <div style="margin-top:6px; display:flex; gap:6px">
+      <button class="secondary" id="chips-all" style="font-size:11px; padding:4px 8px">Tout</button>
+      <button class="secondary" id="chips-none" style="font-size:11px; padding:4px 8px">Aucun</button>
+    </div>
+    <details style="margin-top:6px">
+      <summary>Légende des couleurs (RPG)</summary>
+      <div style="margin-top:6px; display:flex; flex-direction:column; gap:4px; font-size:11px">
+        <div style="display:flex; align-items:center; gap:6px"><span style="display:inline-block;width:14px;height:14px;background:#fdcd80;border:1px solid var(--border);border-radius:2px"></span>Terres arables (céréales, oléagineux, maïs…)</div>
+        <div style="display:flex; align-items:center; gap:6px"><span style="display:inline-block;width:14px;height:14px;background:#94c47d;border:1px solid var(--border);border-radius:2px"></span>Prairies permanentes</div>
+        <div style="display:flex; align-items:center; gap:6px"><span style="display:inline-block;width:14px;height:14px;background:#b48ec4;border:1px solid var(--border);border-radius:2px"></span>Cultures permanentes (vignes, vergers, canne…)</div>
+        <div class="small" style="margin-top:4px">Sur les parcelles sélectionnées, un emoji indique la culture précise.</div>
+      </div>
+    </details>
+    <div class="small" style="margin-top:6px">Cliquer une parcelle sur la carte pour ses infos.</div>
+    <div id="parcel-info"></div>
+
+    <h2>3. Photos de la culture</h2>
+    <div class="small">Plusieurs photos = meilleure analyse (vue large + gros plan feuille/fruit).</div>
+    <div style="margin-top:8px"><input id="photo" type="file" accept="image/*" multiple /></div>
+    <div id="thumbs" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
+    <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
+      <label style="margin:0;flex:0 0 auto">Langue :</label>
+      <select id="dialect" style="flex:1;padding:6px;border-radius:6px;border:1px solid var(--border);background:var(--panel2);color:var(--text);font-size:12px">
+        <option value="fr">Français</option>
+        <option value="rcf">Créole réunionnais (kréol rénioné)</option>
+        <option value="gcf">Créole antillais</option>
+      </select>
+    </div>
+    <div style="margin-top:8px"><button id="analyze" disabled>Analyser</button></div>
+    <div id="analyze-status" class="small" style="margin-top:6px"></div>
+
+    <h2>4. Grille normalisée</h2>
+    <div class="grid" id="metrics"></div>
+
+    <h2>5. Maladies & traitements</h2>
+    <div id="diseases"><div class="small">Analyser une photo pour obtenir le diagnostic.</div></div>
+
+    <details>
+      <summary>JSON brut</summary>
+      <pre id="raw"></pre>
+    </details>
+
+    <h2>☁ Dropbox</h2>
+    <div id="dbx-panel" class="small">Désactivé : configure <code>DROPBOX_APP_KEY</code> en haut du script.</div>
+
+    <div class="small" style="margin-top:16px; border-top: 1px solid var(--border); padding-top: 8px">
+      Sources : <a href="https://adresse.data.gouv.fr" target="_blank">BAN</a> ·
+      <a href="https://geoservices.ign.fr" target="_blank">IGN RPG</a> ·
+      <a href="https://www.openstreetmap.org" target="_blank">OSM</a> ·
+      <a href="https://rnm.franceagrimer.fr" target="_blank">RNM FranceAgriMer</a>
+    </div>
+  </aside>
+  <div id="map"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/suncalc@1.9.0/suncalc.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/lite.umd.js"></script>
+<script>
+// ============ Config ============
+// Two modes:
+//   A) WORKER_URL set → calls Cloudflare Worker which holds the API key server-side. RECOMMENDED.
+//   B) WORKER_URL empty → falls back to direct browser call using ANTHROPIC_API_KEY below.
+//      Only safe on file:// for local testing — key is exposed.
+const WORKER_URL = "http://localhost:8787";  // local wrangler dev; replace with deployed URL in prod
+const ANTHROPIC_API_KEY = "";  // only used when WORKER_URL is empty
+const ANTHROPIC_MODEL = "claude-sonnet-4-5";
+
+// Dropbox persistence — leave empty to disable.
+// Register an app at https://www.dropbox.com/developers/apps:
+//   - Scoped access → App folder
+//   - Permissions: files.content.write + files.content.read
+//   - Copy the App key here (no client secret needed, PKCE flow).
+// This app's settings: https://www.dropbox.com/developers/apps/info/rimf9kjv2vhki4j
+const DROPBOX_APP_KEY = "rimf9kjv2vhki4j";
+// Optional: set to a hosted https URL once you deploy. If empty, the app uses
+// the manual code-paste flow (works from file:// and any hosting).
+const DROPBOX_REDIRECT_URI = "";
+
+const IGN_WMS = "https://data.geopf.fr/wms-r/wms";
+const IGN_WFS = "https://data.geopf.fr/wfs/ows";
+const RPG_LAYER = "IGNF_RPG_PARCELLES-AGRICOLES-CATEGORISEES_2024";
+const RPG_WFS_TYPE = "IGNF_RPG_PARCELLES-AGRICOLES-CATEGORISEES_2024:parcelles_agricole_categorisees_2024";
+const CADASTRE_LAYER = "CADASTRALPARCELS.PARCELLAIRE_EXPRESS";
+const BAN = "https://api-adresse.data.gouv.fr/search/";
+
+// RPG 2024 categorized layer: 3 high-level cat_cult_p categories.
+const RPG_CATEGORIES = {
+  TA: "Terres arables",
+  PP: "Prairies permanentes",
+  CP: "Cultures permanentes (vignes/vergers)"
+};
+
+// Filled in right after CROP_CATALOG is declared (lower in this script).
+const CULTU_LABELS = {};
+
+// ============ Map ============
+const DEFAULT_VIEW = [-21.115, 55.536];  // La Réunion fallback
+const map = L.map("map", { zoomControl: true }).setView(DEFAULT_VIEW, 10);
+window.map = map;  // expose for Playwright / DevTools debugging
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19, attribution: "© OpenStreetMap"
+}).addTo(map);
+
+// ============ Sun compass overlay ============
+const SunCompass = L.Control.extend({
+  options: { position: "topright" },
+  onAdd() {
+    const wrap = L.DomUtil.create("div", "");
+    const disc = L.DomUtil.create("div", "sun-compass", wrap);
+    disc.innerHTML = `
+      <span class="card n">N</span><span class="card s">S</span>
+      <span class="card e">E</span><span class="card w">W</span>
+      <span class="sun">☀</span><span class="moon">🌙</span>`;
+    const meta = L.DomUtil.create("div", "sun-meta", wrap);
+    this._sun = disc.querySelector(".sun");
+    this._moon = disc.querySelector(".moon");
+    this._meta = meta;
+    this.update();
+    return wrap;
+  },
+  // SunCalc azimuth: from south, clockwise → convert to from-north, clockwise.
+  _place(el, body, r, cx, cy, label) {
+    const azN = (body.azimuth + Math.PI + 2 * Math.PI) % (2 * Math.PI);
+    el.style.left = (cx + r * Math.sin(azN)) + "px";
+    el.style.top  = (cy - r * Math.cos(azN)) + "px";
+    el.classList.toggle("below", body.altitude <= 0);
+    const azDeg = Math.round(azN * 180 / Math.PI);
+    const altDeg = Math.round(body.altitude * 180 / Math.PI);
+    el.title = `${label} — azimut ${azDeg}°, hauteur ${altDeg >= 0 ? "+" : ""}${altDeg}°`;
+    return { azDeg, altDeg };
+  },
+  update() {
+    const c = map.getCenter();
+    const now = new Date();
+    const sunPos = SunCalc.getPosition(now, c.lat, c.lng);
+    const moonPos = SunCalc.getMoonPosition(now, c.lat, c.lng);
+    // Slightly different radii so sun and moon don't overlap when close.
+    const s = this._place(this._sun,  sunPos,  28, 35, 35, "Soleil");
+    const m = this._place(this._moon, moonPos, 20, 35, 35, "Lune");
+    const phase = SunCalc.getMoonIllumination(now).phase;  // 0=new … 0.5=full … 1=new
+    const phaseGlyph = ["🌑","🌒","🌓","🌔","🌕","🌖","🌗","🌘"][Math.round(phase * 8) % 8];
+    this._moon.textContent = phaseGlyph;
+    this._meta.innerHTML =
+      `☀ ${s.azDeg}° / ${s.altDeg >= 0 ? "+" : ""}${s.altDeg}°<br>` +
+      `${phaseGlyph} ${m.azDeg}° / ${m.altDeg >= 0 ? "+" : ""}${m.altDeg}°`;
+  }
+});
+const sunCompass = new SunCompass().addTo(map);
+map.on("moveend", () => sunCompass.update());
+setInterval(() => sunCompass.update(), 60000);
+
+// Geolocation: center on user if available, else keep default.
+if (navigator.geolocation) {
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const { latitude: lat, longitude: lon } = pos.coords;
+      map.setView([lat, lon], 15);
+      L.circleMarker([lat, lon], { radius: 6, color: "#4ade80", fillOpacity: 0.8 })
+        .addTo(map).bindPopup("Position actuelle").openPopup();
+      // Reverse-geocode via BAN so the rest of the flow has an address context.
+      fetch(`https://api-adresse.data.gouv.fr/reverse/?lat=${lat}&lon=${lon}`)
+        .then(r => r.json())
+        .then(j => {
+          const f = j.features?.[0];
+          if (!f) return;
+          currentAddress = {
+            label: f.properties.label,
+            lat, lon,
+            city: f.properties.city,
+            postcode: f.properties.postcode,
+            context: f.properties.context
+          };
+          document.getElementById("addr").value = currentAddress.label;
+          document.getElementById("status").textContent = currentAddress.label;
+        })
+        .catch(() => {
+          currentAddress = { label: `(${lat.toFixed(5)}, ${lon.toFixed(5)})`, lat, lon };
+          document.getElementById("status").textContent = currentAddress.label;
+        });
+    },
+    err => {
+      document.getElementById("status").textContent =
+        "Géoloc refusée/indisponible — vue par défaut : La Réunion.";
+    },
+    { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 }
+  );
+}
+
+let rpgLayer = null;
+let selectedGroups = new Set();
+let addressMarker = null;
+let currentAddress = null;  // { label, lat, lon, city, postcode, context }
+
+function refreshRpgLayer() {
+  if (rpgLayer) map.removeLayer(rpgLayer);
+  rpgLayer = buildRpgLayer().addTo(map);
+}
+// buildRpgLayer() is defined below in the "Viewport-based crop chips" section.
+
+// Cadastre overlay (all parcels, agricultural or not). Toggleable.
+const cadastreLayer = L.tileLayer.wms(IGN_WMS, {
+  layers: CADASTRE_LAYER, format: "image/png", transparent: true,
+  version: "1.3.0", attribution: "Cadastre © DGFiP/IGN", opacity: 0.55
+});
+
+// ============ Viewport-based crop chips ============
+// Chips list distinct code_cultu found in the current map viewport.
+// "selectedGroups" now holds code_cultu values (e.g. 'BTH', 'CSU'), not category codes.
+const chipsEl = document.getElementById("chips");
+let chipEls = {};               // code_cultu → element
+let viewportCultus = new Set(); // code_cultu visible in current viewport
+let chipsExcluded = new Set();  // user-EXCLUDED code_cultu (selectedGroups = viewportCultus - chipsExcluded)
+
+// Override buildRpgLayer to filter by code_cultu instead of cat_cult_p when chips active.
+function rebuildRpgFilter() {
+  selectedGroups.clear();
+  for (const c of viewportCultus) if (!chipsExcluded.has(c)) selectedGroups.add(c);
+  refreshRpgLayer();
+}
+function buildRpgLayer() {  // re-define overriding earlier
+  const opts = {
+    layers: RPG_LAYER, format: "image/png", transparent: true,
+    version: "1.3.0", attribution: "RPG © IGN", opacity: 0.65
+  };
+  if (viewportCultus.size > 0) {
+    if (chipsExcluded.size === 0) {
+      // no exclusion → no filter (show all, fastest)
+    } else if (selectedGroups.size === 0) {
+      opts.CQL_FILTER = `code_cultu IN ('__none__')`;  // hide all
+    } else {
+      const codes = [...selectedGroups].map(c => `'${c}'`).join(",");
+      opts.CQL_FILTER = `code_cultu IN (${codes})`;
+    }
+  }
+  return L.tileLayer.wms(IGN_WMS, opts);
+}
+
+async function refreshChips() {
+  if (map.getZoom() < 11) {
+    chipsEl.innerHTML = `<div class="small">Zoomer (≥11) pour voir les cultures du secteur.</div>`;
+    return;
+  }
+  const b = map.getBounds();
+  const bbox = `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()},EPSG:4326`;
+  const params = new URLSearchParams({
+    service: "WFS", version: "2.0.0", request: "GetFeature",
+    typeNames: RPG_WFS_TYPE,
+    bbox, count: "500", outputFormat: "application/json",
+    srsName: "EPSG:4326", propertyName: "code_cultu"
+  });
+  chipsEl.innerHTML = `<div class="small">Recherche…</div>`;
+  try {
+    const r = await fetch(`${IGN_WFS}?${params}`);
+    const j = await r.json();
+    const cultus = new Set();
+    (j.features || []).forEach(f => { if (f.properties?.code_cultu) cultus.add(f.properties.code_cultu); });
+    viewportCultus = cultus;
+    // Drop excluded entries no longer in viewport
+    chipsExcluded = new Set([...chipsExcluded].filter(c => cultus.has(c)));
+    renderChips();
+    rebuildRpgFilter();
+  } catch (e) {
+    chipsEl.innerHTML = `<div class="small">Erreur : ${e.message}</div>`;
+  }
+}
+
+function renderChips() {
+  chipsEl.innerHTML = "";
+  chipEls = {};
+  if (viewportCultus.size === 0) {
+    chipsEl.innerHTML = `<div class="small">Aucune parcelle agricole dans la vue.</div>`;
+    return;
+  }
+  [...viewportCultus].sort().forEach(code => {
+    const el = document.createElement("div");
+    const on = !chipsExcluded.has(code);
+    el.className = "chip" + (on ? " on" : "");
+    el.textContent = CULTU_LABELS[code] || code;
+    el.title = `code_cultu=${code}`;
+    el.addEventListener("click", () => {
+      if (chipsExcluded.has(code)) { chipsExcluded.delete(code); el.classList.add("on"); }
+      else { chipsExcluded.add(code); el.classList.remove("on"); }
+      rebuildRpgFilter();
+    });
+    chipsEl.appendChild(el);
+    chipEls[code] = el;
+  });
+}
+
+document.getElementById("chips-all").addEventListener("click", () => {
+  chipsExcluded.clear(); renderChips(); rebuildRpgFilter();
+});
+document.getElementById("chips-none").addEventListener("click", () => {
+  chipsExcluded = new Set(viewportCultus); renderChips(); rebuildRpgFilter();
+});
+
+// Debounced refresh on map move
+let _chipsTimer = null;
+map.on("moveend", () => {
+  clearTimeout(_chipsTimer);
+  _chipsTimer = setTimeout(refreshChips, 500);
+});
+// Initial RPG render (no filter yet, viewportCultus empty → all parcels show)
+refreshRpgLayer();
+// Layer toggle (RPG / Cadastre)
+const layerCtl = L.control.layers(null, {
+  "RPG (parcelles agricoles)": rpgLayer,
+  "Cadastre (toutes parcelles)": cadastreLayer
+}, { collapsed: false }).addTo(map);
+// When rpgLayer is rebuilt by refreshRpgLayer(), re-register it in the control.
+const _origRefresh = refreshRpgLayer;
+refreshRpgLayer = function() {
+  const wasOnMap = !rpgLayer || map.hasLayer(rpgLayer);
+  if (rpgLayer) layerCtl.removeLayer(rpgLayer);
+  _origRefresh();
+  layerCtl.addOverlay(rpgLayer, "RPG (parcelles agricoles)");
+  if (!wasOnMap) map.removeLayer(rpgLayer);
+};
+// Initial chip load after map settles
+setTimeout(refreshChips, 800);
+
+// ============ Address geocoding ============
+const statusEl = document.getElementById("status");
+async function geocode() {
+  const q = document.getElementById("addr").value.trim();
+  if (!q) return;
+  statusEl.textContent = "Géocodage…";
+  try {
+    const r = await fetch(`${BAN}?q=${encodeURIComponent(q)}&limit=1`);
+    const j = await r.json();
+    if (!j.features?.length) { statusEl.textContent = "Adresse introuvable."; return; }
+    const f = j.features[0];
+    const [lon, lat] = f.geometry.coordinates;
+    currentAddress = {
+      label: f.properties.label,
+      lat, lon,
+      city: f.properties.city,
+      postcode: f.properties.postcode,
+      context: f.properties.context  // "33, Gironde, Nouvelle-Aquitaine"
+    };
+    map.setView([lat, lon], 16);
+    if (addressMarker) map.removeLayer(addressMarker);
+    addressMarker = L.marker([lat, lon]).addTo(map).bindPopup(currentAddress.label).openPopup();
+    statusEl.textContent = currentAddress.label;
+  } catch (e) {
+    statusEl.textContent = "Erreur géocodage : " + e.message;
+  }
+}
+document.getElementById("go").addEventListener("click", geocode);
+document.getElementById("addr").addEventListener("keydown", e => { if (e.key === "Enter") geocode(); });
+
+// ============ Parcel multi-selection (click to toggle) ============
+const parcelInfoEl = document.getElementById("parcel-info");
+const selectedParcels = new Map();  // id -> { props, geometry }
+const parcelHighlight = L.featureGroup().addTo(map);
+let parcelsLocked = false;
+
+const featureKey = f =>
+  f.id || `${f.properties.pacage}-${f.properties.num_ilot}-${f.properties.num_parcel}-${f.properties.code_cultu}`;
+
+// sf_adm_de can be 0 even when the parcel has area — fall back to sf_adm_co in that case.
+const parcelArea = p => (p.sf_adm_de > 0 ? p.sf_adm_de : (p.sf_adm_co > 0 ? p.sf_adm_co : 0));
+
+// Point-in-ring (ray-casting). pt = [lon, lat], ring = [[lon,lat], ...]
+function pointInRing(pt, ring) {
+  const [x, y] = pt;
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i], [xj, yj] = ring[j];
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
+function pointInPolygon(pt, polygon) {
+  if (!pointInRing(pt, polygon[0])) return false;
+  for (let i = 1; i < polygon.length; i++) if (pointInRing(pt, polygon[i])) return false;
+  return true;
+}
+function pointInGeom(pt, geom) {
+  if (geom.type === "Polygon") return pointInPolygon(pt, geom.coordinates);
+  if (geom.type === "MultiPolygon") return geom.coordinates.some(p => pointInPolygon(pt, p));
+  return false;
+}
+
+async function toggleParcelAt(latlng) {
+  const { lat, lng: lon } = latlng;
+  // Bigger bbox to fetch multiple candidates, then pick the one containing the click.
+  const d = 0.0005;
+  const bbox = `${lon - d},${lat - d},${lon + d},${lat + d},EPSG:4326`;
+  const params = new URLSearchParams({
+    service: "WFS", version: "2.0.0", request: "GetFeature",
+    typeNames: RPG_WFS_TYPE,
+    bbox, count: "10", outputFormat: "application/json", srsName: "EPSG:4326"
+  });
+  try {
+    const r = await fetch(`${IGN_WFS}?${params}`);
+    const j = await r.json();
+    if (!j.features?.length) {
+      parcelInfoEl.innerHTML = `<dt>Aucune parcelle RPG ici</dt><dd class="small">Cliquer sur une zone agricole.</dd>`;
+      parcelInfoEl.style.display = "block";
+      return;
+    }
+    // Pick the feature whose polygon actually contains the click point.
+    const pt = [lon, lat];
+    const hit = j.features.find(f => pointInGeom(pt, f.geometry)) || j.features[0];
+    const id = featureKey(hit);
+    if (selectedParcels.has(id)) selectedParcels.delete(id);
+    else selectedParcels.set(id, { props: hit.properties, geometry: hit.geometry, latlng: [lat, lon] });
+    renderParcelHighlight();
+    renderParcelInfoPanel();
+    updateLockHint();
+  } catch (err) {
+    parcelInfoEl.innerHTML = `<dt>Erreur</dt><dd>${err.message}</dd>`;
+    parcelInfoEl.style.display = "block";
+  }
+}
+
+function renderParcelHighlight() {
+  parcelHighlight.clearLayers();
+  for (const [, p] of selectedParcels) {
+    const layer = L.geoJSON(p.geometry, {
+      style: { color: "#4ade80", weight: 2, fillColor: "#4ade80", fillOpacity: 0.35 }
+    }).addTo(parcelHighlight);
+    // Emoji label at the parcel centroid (geographic bounds center is close enough for visual cue).
+    const meta = cropMeta(p.props?.code_cultu);
+    if (meta.emoji) {
+      const center = layer.getBounds().getCenter();
+      L.marker(center, {
+        interactive: false,
+        keyboard: false,
+        icon: L.divIcon({
+          className: "",
+          html: `<div class="parcel-emoji" title="${meta.fr}">${meta.emoji}</div>`,
+          iconSize: [28, 28],
+          iconAnchor: [14, 14]
+        })
+      }).addTo(parcelHighlight);
+    }
+  }
+}
+
+function fitToSelectedParcels() {
+  if (selectedParcels.size === 0) return;
+  const b = parcelHighlight.getBounds();
+  if (!b.isValid()) return;
+  const sz = map.getSize();
+  // 15% padding on each side.
+  const padX = Math.round(sz.x * 0.15);
+  const padY = Math.round(sz.y * 0.15);
+  map.fitBounds(b, { paddingTopLeft: [padX, padY], paddingBottomRight: [padX, padY], animate: true });
+}
+
+function aggregateParcels() {
+  let totalArea = 0;
+  const byCrop = {};  // code_cultu → { count, area, category, bio }
+  for (const [, p] of selectedParcels) {
+    const a = parcelArea(p.props);
+    totalArea += a;
+    const k = p.props.code_cultu || "?";
+    byCrop[k] = byCrop[k] || { count: 0, area: 0, category: p.props.cat_cult_p, bio: 0 };
+    byCrop[k].count++;
+    byCrop[k].area += a;
+    if (p.props.bio === 1) byCrop[k].bio++;
+  }
+  return { totalArea, byCrop };
+}
+
+function renderParcelInfoPanel() {
+  if (selectedParcels.size === 0) { parcelInfoEl.style.display = "none"; return; }
+  const { totalArea, byCrop } = aggregateParcels();
+  const lockBadge = parcelsLocked ? ` <span style="color:var(--warn)">🔒</span>` : "";
+  let html = `<dt>${selectedParcels.size} parcelle(s) — ${totalArea.toFixed(2)} ha${lockBadge}</dt>`;
+  Object.entries(byCrop).sort((a,b) => b[1].area - a[1].area).forEach(([code, agg]) => {
+    const label = CULTU_LABELS[code] || code;
+    const bioTag = agg.bio === agg.count ? " 🌱" : agg.bio ? ` (${agg.bio} bio)` : "";
+    html += `<dd>${label} <span class="small">(${code})</span> — ${agg.count} × ${agg.area.toFixed(2)} ha${bioTag}</dd>`;
+  });
+  html += `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+    <button class="secondary" id="fit-parcels" style="font-size:11px;padding:4px 8px">🎯 Cadrer</button>
+    <button class="secondary" id="lock-parcels" style="font-size:11px;padding:4px 8px">${parcelsLocked ? "🔓 Déverrouiller" : "🔒 Verrouiller"}</button>
+    <button class="secondary" id="clear-parcels" style="font-size:11px;padding:4px 8px" ${parcelsLocked ? "disabled" : ""}>Tout désélectionner</button>
+  </div>`;
+  parcelInfoEl.innerHTML = html;
+  parcelInfoEl.style.display = "block";
+  document.getElementById("clear-parcels").onclick = () => {
+    if (parcelsLocked) return;
+    selectedParcels.clear();
+    renderParcelHighlight();
+    renderParcelInfoPanel();
+    updateLockHint();
+  };
+  document.getElementById("lock-parcels").onclick = () => {
+    parcelsLocked = !parcelsLocked;
+    renderParcelInfoPanel();
+    updateLockHint();
+    if (parcelsLocked) fitToSelectedParcels();
+  };
+  document.getElementById("fit-parcels").onclick = () => fitToSelectedParcels();
+}
+
+// On-map hint: a small badge top-left of the map showing lock state.
+let _lockHint = null;
+function updateLockHint() {
+  if (!_lockHint) {
+    const LockHint = L.Control.extend({
+      options: { position: "topleft" },
+      onAdd() {
+        const el = L.DomUtil.create("div", "lock-hint");
+        L.DomEvent.disableClickPropagation(el);
+        el.addEventListener("click", () => {
+          parcelsLocked = !parcelsLocked;
+          renderParcelInfoPanel();
+          updateLockHint();
+        });
+        return el;
+      }
+    });
+    _lockHint = new LockHint().addTo(map);
+  }
+  const el = _lockHint.getContainer();
+  if (selectedParcels.size === 0) { el.style.display = "none"; return; }
+  el.style.display = "block";
+  el.innerHTML = parcelsLocked
+    ? `🔒 Parcelles verrouillées — clic sur la carte ignoré`
+    : `🔓 Parcelles déverrouillées — clic = toggle parcelle`;
+  el.className = "lock-hint " + (parcelsLocked ? "locked" : "unlocked");
+}
+
+// ============ Photos with map locations ============
+const photoEl = document.getElementById("photo");
+const analyzeBtn = document.getElementById("analyze");
+const aStatus = document.getElementById("analyze-status");
+const thumbsEl = document.getElementById("thumbs");
+const mapEl = document.getElementById("map");
+const photos = [];           // [{ id, name, mime, b64, dataUrl, lat?, lon?, marker? }]
+let placingPhotoId = null;   // when set, next non-placing map click drops a pin
+let aimingPhotoId = null;    // when set, next map click sets the photo's direction
+
+function readFileAsB64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res({ dataUrl: r.result, b64: r.result.split(",")[1] });
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+}
+
+// Downscale + recompress in browser. Anthropic vision caps at 5 MB / image.
+// Default: max 1568 px (Claude's optimal long side) and JPEG quality 0.85.
+async function compressImage(file, { maxDim = 1568, quality = 0.85, maxBytes = 4 * 1024 * 1024 } = {}) {
+  if (file.size < maxBytes && !/image\/(heic|heif)/i.test(file.type)) {
+    // Small enough: still decode + check dimensions; cheap if already in cache.
+  }
+  const dataUrl = await new Promise((res, rej) => {
+    const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file);
+  });
+  const img = await new Promise((res, rej) => {
+    const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = dataUrl;
+  });
+  const maxSide = Math.max(img.width, img.height);
+  if (maxSide <= maxDim && file.size < maxBytes) {
+    return { dataUrl, b64: dataUrl.split(",")[1], mime: file.type || "image/jpeg",
+             width: img.width, height: img.height, recompressed: false };
+  }
+  const scale = Math.min(1, maxDim / maxSide);
+  const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+  let q = quality, out;
+  // Try progressively lower quality until under maxBytes (base64 inflates ~33%).
+  for (let i = 0; i < 4; i++) {
+    out = canvas.toDataURL("image/jpeg", q);
+    if (out.length * 0.75 < maxBytes) break;
+    q -= 0.1;
+  }
+  return { dataUrl: out, b64: out.split(",")[1], mime: "image/jpeg",
+           width: w, height: h, recompressed: true };
+}
+
+// Compute a destination point given start lat/lon, bearing (deg from N), distance (m).
+function destPoint(lat, lon, bearing, distM) {
+  const R = 6378137;
+  const br = bearing * Math.PI / 180;
+  const lat1 = lat * Math.PI / 180, lon1 = lon * Math.PI / 180;
+  const dr = distM / R;
+  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(dr) + Math.cos(lat1) * Math.sin(dr) * Math.cos(br));
+  const lon2 = lon1 + Math.atan2(Math.sin(br) * Math.sin(dr) * Math.cos(lat1),
+                                  Math.cos(dr) - Math.sin(lat1) * Math.sin(lat2));
+  return [lat2 * 180 / Math.PI, lon2 * 180 / Math.PI];
+}
+
+function placePhotoMarker(p) {
+  if (p.marker) map.removeLayer(p.marker);
+  if (p.fovLayer) map.removeLayer(p.fovLayer);
+  const idx = photos.indexOf(p) + 1;
+  // Pin: arrow shape rotated toward direction when known, else plain disc.
+  const html = p.direction != null
+    ? `<div class="photo-pin" style="transform:rotate(${p.direction}deg)">▲<span style="position:absolute;font-size:9px;transform:rotate(${-p.direction}deg);color:#fff;font-weight:700">${idx}</span></div>`
+    : `<div class="photo-pin">${idx}</div>`;
+  const icon = L.divIcon({ className: "", html, iconSize: [24, 24], iconAnchor: [12, 12] });
+  p.marker = L.marker([p.lat, p.lon], { icon })
+    .addTo(map)
+    .bindPopup(`<img src="${p.dataUrl}" style="max-width:240px;display:block"/><div style="font-size:11px;margin-top:4px">${p.name}${p.direction!=null?` · ${Math.round(p.direction)}° (${cardinal(p.direction)})`:""}</div>`);
+  // Direction cone (60° FOV, 80 m radius) drawn on the map when direction is known.
+  if (p.direction != null) {
+    const fov = 60, range = 80;
+    const left = destPoint(p.lat, p.lon, p.direction - fov / 2, range);
+    const right = destPoint(p.lat, p.lon, p.direction + fov / 2, range);
+    p.fovLayer = L.polygon([[p.lat, p.lon], left, right], {
+      color: "#4ade80", weight: 1, fillColor: "#4ade80", fillOpacity: 0.18, interactive: false
+    }).addTo(map);
+  }
+}
+
+function cardinal(deg) {
+  const dirs = ["N","NE","E","SE","S","SO","O","NO"];
+  return dirs[Math.round(((deg % 360) / 45)) % 8];
+}
+
+function renderPhotos() {
+  thumbsEl.innerHTML = "";
+  photos.forEach((p, i) => {
+    const wrap = document.createElement("div");
+    wrap.className = "photo-card";
+    const loc = (p.lat != null)
+      ? `<div>📍 ${p.lat.toFixed(4)}, ${p.lon.toFixed(4)} <span style="color:${p.locSource === "exif" ? "var(--accent)" : "var(--warn)"}">${p.locSource === "exif" ? "EXIF" : "manuel"}</span></div>`
+      : `<div style="color:var(--bad)">📍 Pas de GPS dans la photo</div>`;
+    const dir = p.direction != null
+      ? `<div>🧭 ${Math.round(p.direction)}° ${cardinal(p.direction)}</div>`
+      : "";
+    const time = p.takenAt
+      ? `<div title="${p.takenAt.toLocaleString("fr-FR")}">🕒 ${formatRelativeDays((p.takenAt - Date.now()) / 86400000)}</div>`
+      : (p.exifFound ? `<div style="color:var(--muted)">🕒 Pas d'horodatage</div>` : `<div style="color:var(--muted)">🕒 Pas d'EXIF</div>`);
+    wrap.innerHTML = `
+      <div style="position:relative">
+        <img src="${p.dataUrl}" alt="${p.name}" />
+        <div style="position:absolute;top:-4px;left:-4px;background:var(--accent);color:#0a0e13;border-radius:50%;width:16px;height:16px;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center">${i+1}</div>
+      </div>
+      <div class="meta">
+        <div title="${p.name}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</div>
+        ${loc}${dir}${time}
+        <div style="display:flex;gap:4px;margin-top:2px;flex-wrap:wrap">
+          <button class="secondary place" data-id="${p.id}">${p.lat != null ? "Replacer" : "📍 Placer"}</button>
+          <button class="secondary aim" data-id="${p.id}" ${p.lat == null ? "disabled title='Place la photo d&apos;abord'" : ""}>🧭 Direction</button>
+        </div>
+      </div>
+      <button class="del" data-id="${p.id}">×</button>
+    `;
+    thumbsEl.appendChild(wrap);
+  });
+  thumbsEl.querySelectorAll(".place").forEach(b => b.onclick = e => {
+    placingPhotoId = e.target.dataset.id;
+    aimingPhotoId = null;
+    mapEl.classList.add("map-placing");
+    aStatus.textContent = "Cliquez sur la carte pour placer cette photo (Echap pour annuler).";
+  });
+  thumbsEl.querySelectorAll(".aim").forEach(b => b.onclick = e => {
+    aimingPhotoId = e.target.dataset.id;
+    placingPhotoId = null;
+    mapEl.classList.add("map-placing");
+    aStatus.textContent = "Cliquez sur la carte vers où la photo a été prise (Echap pour annuler).";
+  });
+  thumbsEl.querySelectorAll(".del").forEach(b => b.onclick = e => {
+    const id = e.target.dataset.id;
+    const idx = photos.findIndex(x => x.id === id);
+    if (idx >= 0) {
+      if (photos[idx].marker) map.removeLayer(photos[idx].marker);
+      if (photos[idx].fovLayer) map.removeLayer(photos[idx].fovLayer);
+      photos.splice(idx, 1);
+      // re-number remaining markers
+      photos.forEach(p => { if (p.lat != null) placePhotoMarker(p); });
+      renderPhotos();
+      analyzeBtn.disabled = photos.length === 0;
+    }
+  });
+}
+
+window.addEventListener("keydown", e => {
+  if (e.key === "Escape" && (placingPhotoId || aimingPhotoId)) {
+    placingPhotoId = null; aimingPhotoId = null;
+    mapEl.classList.remove("map-placing");
+    aStatus.textContent = "Annulé.";
+  }
+});
+
+// Bearing from (lat1,lon1) to (lat2,lon2), degrees from north clockwise.
+function bearingTo(lat1, lon1, lat2, lon2) {
+  const toRad = d => d * Math.PI / 180;
+  const φ1 = toRad(lat1), φ2 = toRad(lat2), Δλ = toRad(lon2 - lon1);
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+photoEl.addEventListener("change", async () => {
+  const files = [...(photoEl.files || [])];
+  aStatus.textContent = `Préparation de ${files.length} photo(s)…`;
+  for (const f of files) {
+    // Compress for API (≤5 MB). EXIF GPS+direction must be read from the ORIGINAL file (compressed canvas drops EXIF).
+    let gps = null, direction = null, takenAt = null, exifFound = false;
+    try {
+      if (window.exifr) {
+        gps = await exifr.gps(f);
+        const all = await exifr.parse(f, ["GPSImgDirection", "DateTimeOriginal", "CreateDate", "DateTime"]).catch(() => null);
+        if (all) {
+          exifFound = true;
+          if (all.GPSImgDirection != null) direction = all.GPSImgDirection;
+          takenAt = all.DateTimeOriginal || all.CreateDate || all.DateTime || null;
+          if (takenAt && !(takenAt instanceof Date)) takenAt = new Date(takenAt);
+          if (takenAt && isNaN(takenAt.getTime())) takenAt = null;
+        }
+      }
+    } catch {}
+    const { dataUrl, b64, mime, width, height, recompressed } = await compressImage(f);
+    const photo = {
+      id: crypto.randomUUID(),
+      name: f.name, mime, b64, dataUrl, width, height, recompressed,
+      lat: gps?.latitude ?? null, lon: gps?.longitude ?? null,
+      direction,  // degrees from north (0=N, 90=E), or null
+      takenAt,    // Date or null
+      exifFound,  // whether any EXIF metadata was decoded at all
+      locSource: gps?.latitude != null ? "exif" : null,
+      marker: null, fovLayer: null
+    };
+    photos.push(photo);
+    if (photo.lat != null) placePhotoMarker(photo);
+  }
+  photoEl.value = "";  // allow re-adding same file
+  renderPhotos();
+  analyzeBtn.disabled = photos.length === 0;
+  const compressed = photos.filter(p => p.recompressed).length;
+  aStatus.textContent = `${photos.length} photo(s) prête(s)${compressed ? ` (${compressed} recompressée(s))` : ""}.`;
+});
+
+// ============ Unified map click handler ============
+map.on("click", async e => {
+  if (placingPhotoId) {
+    const p = photos.find(x => x.id === placingPhotoId);
+    if (p) {
+      p.lat = e.latlng.lat; p.lon = e.latlng.lng; p.locSource = "manual";
+      placePhotoMarker(p);
+      renderPhotos();
+      aStatus.textContent = "Photo placée.";
+    }
+    placingPhotoId = null;
+    mapEl.classList.remove("map-placing");
+    return;
+  }
+  if (aimingPhotoId) {
+    const p = photos.find(x => x.id === aimingPhotoId);
+    if (p && p.lat != null) {
+      p.direction = bearingTo(p.lat, p.lon, e.latlng.lat, e.latlng.lng);
+      placePhotoMarker(p);
+      renderPhotos();
+      aStatus.textContent = `Direction réglée : ${Math.round(p.direction)}° ${cardinal(p.direction)}.`;
+    }
+    aimingPhotoId = null;
+    mapEl.classList.remove("map-placing");
+    return;
+  }
+  if (parcelsLocked) {
+    // Visual cue: flash the lock hint.
+    if (_lockHint) {
+      const el = _lockHint.getContainer();
+      el.classList.add("flash");
+      setTimeout(() => el.classList.remove("flash"), 600);
+    }
+    return;
+  }
+  if (map.getZoom() < 12) {
+    parcelInfoEl.innerHTML = `<dt>Zoomer davantage</dt><dd class="small">Le clic est trop imprécis à ce niveau de zoom (≥12 recommandé).</dd>`;
+    parcelInfoEl.style.display = "block";
+    return;
+  }
+  await toggleParcelAt(e.latlng);
+});
+
+// ============ Normalized metrics schema ============
+const METRIC_SCHEMA = {
+  identification: {
+    dominant_crop_fr: "string — nom commun FR (ex: vigne, canne à sucre, banane)",
+    scientific_name: "string",
+    confidence_0_1: "number"
+  },
+  parcels_summary: {
+    count: "number — total parcels analyzed",
+    total_area_ha: "number",
+    crops_breakdown: "array of {code_cultu, area_ha, share_pct}"
+  },
+  health: {
+    vigor_0_100: "number — visible plant vigor across photos",
+    disease_pressure_0_100: "number — overall visible disease/pest pressure",
+    spatial_observations: "array of {photo_index (1-based), observation} — what is seen WHERE; mention if a photo shows healthier/diseased zones"
+  },
+  phenology: {
+    current_stage: "string — BBCH or common stage name",
+    maturity_pct: "number 0-100",
+    expected_harvest_in_days: "number — days from today (positive=future, negative=past); compute relative to today's date",
+    expected_harvest_window_iso: "string — YYYY-MM or YYYY-MM to YYYY-MM (for reference)"
+  },
+  yield: {
+    estimated_t_per_ha: "number",
+    estimated_total_t: "number — t_per_ha × total_area_ha; null if area unknown",
+    confidence_0_1: "number"
+  },
+  market: {
+    indicative_price_eur_per_kg: "number|null",
+    estimated_total_value_eur: "number|null — total_t × price × 1000",
+    source_hint: "string — e.g. 'RNM FranceAgriMer'",
+    notes: "string"
+  },
+  diseases: "array of disease objects — list the 3-6 most relevant for the identified crop in this region/season. Each: {name_fr, name_local (vernacular name in the requested dialect, null if dialect=fr or unknown), scientific, presence_probability_0_1, yield_impact_pct_if_untreated (negative number, e.g. -25), treatments: [{name, name_local (null if dialect=fr), type ('chimique'|'biologique'|'agronomique'), success_probability_0_1, recovery_pct (positive yield points recovered, e.g. +18), cost_breakdown: {materials_eur_per_ha, prep_time_h_per_ha, application_time_h_per_ha, labor_eur_per_h (default FR ~25), equipment_eur_per_ha}}]}",
+  notes: "string — caveats, limitations, what was not assessable"
+};
+
+function formatRelativeDays(days) {
+  if (days == null || !isFinite(days)) return "—";
+  const d = Math.round(days);
+  if (Math.abs(d) < 1) return "aujourd'hui";
+  const past = d < 0;
+  const abs = Math.abs(d);
+  let txt;
+  if (abs < 14) txt = `${abs} j`;
+  else if (abs < 60) txt = `${Math.round(abs/7)} sem.`;
+  else if (abs < 730) txt = `${Math.round(abs/30)} mois`;
+  else txt = `${(abs/365).toFixed(1)} ans`;
+  return past ? `il y a ${txt}` : `dans ${txt}`;
+}
+
+// Crop metadata catalog, keyed by RPG code_cultu.
+// Each entry: { scientific?, fr, emoji, image? (local override), locals? (per dialect) }
+// Extend freely; entries without images fall back to Wikipedia / iNaturalist lookup.
+const CROP_CATALOG = {
+  BAN: { scientific: "Musa × paradisiaca", fr: "Bananier", emoji: "🍌", locals: { rcf: "Bananyé", gcf: "Bannann" } },
+  CSU: { scientific: "Saccharum officinarum", fr: "Canne à sucre", emoji: "🎋", locals: { rcf: "Kann", gcf: "Kann" } },
+  BTH: { scientific: "Triticum aestivum", fr: "Blé tendre d'hiver", emoji: "🌾" },
+  BTP: { scientific: "Triticum aestivum", fr: "Blé tendre de printemps", emoji: "🌾" },
+  TTH: { scientific: "× Triticosecale", fr: "Triticale d'hiver", emoji: "🌾" },
+  ORH: { scientific: "Hordeum vulgare", fr: "Orge d'hiver", emoji: "🌾" },
+  MIS: { scientific: "Zea mays", fr: "Maïs", emoji: "🌽" },
+  MIE: { scientific: "Zea mays", fr: "Maïs ensilage", emoji: "🌽" },
+  CZH: { scientific: "Brassica napus", fr: "Colza d'hiver", emoji: "🌼" },
+  TRN: { scientific: "Helianthus annuus", fr: "Tournesol", emoji: "🌻" },
+  VRC: { scientific: "Vitis vinifera", fr: "Vigne raisin de cuve", emoji: "🍇" },
+  VRT: { scientific: "Vitis vinifera", fr: "Vigne raisin de table", emoji: "🍇" },
+  PPH: { fr: "Prairie permanente herbe", emoji: "🌿" },
+  SPH: { fr: "Surface pastorale herbacée", emoji: "🌿" },
+  SPL: { fr: "Surface pastorale ligneuse", emoji: "🌳" },
+  PPR: { fr: "Prairie en rotation longue", emoji: "🌿" },
+  PTR: { fr: "Prairie temporaire", emoji: "🌱" },
+  PVT: { fr: "Verger", emoji: "🍎" },
+  AGR: { scientific: "Citrus", fr: "Agrumes", emoji: "🍊", locals: { rcf: "Sitron" } },
+  JAC: { fr: "Jachère", emoji: "🪶" },
+  LDH: { scientific: "Lavandula", fr: "Lavande / lavandin", emoji: "💜" },
+  FVP: { scientific: "Vicia faba", fr: "Féverole", emoji: "🫘" },
+  MLC: { fr: "Mélange légumineuses / céréales", emoji: "🌾" },
+  MDI: { fr: "Maraîchage diversifié", emoji: "🥬" }
+};
+
+function cropMeta(code) {
+  return CROP_CATALOG[code] || { fr: code, emoji: "🌱" };
+}
+function rebuildCultuLabels() {
+  for (const k of Object.keys(CULTU_LABELS)) delete CULTU_LABELS[k];
+  for (const [code, m] of Object.entries(CROP_CATALOG)) CULTU_LABELS[code] = m.fr;
+}
+rebuildCultuLabels();
+
+// Load external catalog (catalog.json) and merge over the inline defaults.
+// Inline catalog acts as the offline/file:// fallback.
+fetch("catalog.json").then(r => r.ok ? r.json() : null).then(j => {
+  if (!j?.crops) return;
+  Object.assign(CROP_CATALOG, j.crops);
+  rebuildCultuLabels();
+}).catch(() => { /* offline / file:// — inline catalog stands */ });
+
+// Generic taxon image lookup: local catalog → Wikipedia (FR then EN) → iNaturalist.
+// Caches each (key, source) hit in localStorage. Returns { url, source } or null.
+async function lookupTaxonImage(sciName, commonFr, catalog = CROP_CATALOG) {
+  const tryKeys = [sciName, commonFr].filter(Boolean);
+
+  // 1. Local catalog
+  for (const k of tryKeys) {
+    const hit = catalog[k] || catalog[k.toLowerCase()];
+    if (hit) return { url: hit, source: "catalogue local" };
+  }
+
+  // 2. Wikipedia FR + EN, per key
+  for (const k of tryKeys) {
+    const cacheKey = `img:${k}`;
+    const cached = localStorage.getItem(cacheKey);
+    if (cached && cached !== "MISS") {
+      const [src, url] = cached.split("|", 2);
+      return { url, source: src + " (cache)" };
+    }
+    if (cached === "MISS") continue;
+    for (const lang of ["fr", "en"]) {
+      try {
+        const r = await fetch(`https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(k)}`);
+        if (!r.ok) continue;
+        const j = await r.json();
+        const url = j.thumbnail?.source || j.originalimage?.source;
+        if (url) {
+          const src = `Wikipedia ${lang.toUpperCase()}`;
+          localStorage.setItem(cacheKey, `${src}|${url}`);
+          return { url, source: src };
+        }
+      } catch {}
+    }
+  }
+
+  // 3. iNaturalist taxa search (better for many diseases/pathogens not on Wikipedia)
+  for (const k of tryKeys) {
+    const cacheKey = `inat:${k}`;
+    const cached = localStorage.getItem(cacheKey);
+    if (cached && cached !== "MISS") return { url: cached, source: "iNaturalist (cache)" };
+    if (cached === "MISS") continue;
+    try {
+      const r = await fetch(`https://api.inaturalist.org/v1/taxa?q=${encodeURIComponent(k)}&per_page=1&locale=fr`);
+      if (!r.ok) continue;
+      const j = await r.json();
+      const url = j.results?.[0]?.default_photo?.medium_url || j.results?.[0]?.default_photo?.square_url;
+      if (url) {
+        localStorage.setItem(cacheKey, url);
+        return { url, source: "iNaturalist" };
+      }
+    } catch {}
+    localStorage.setItem(cacheKey, "MISS");
+  }
+
+  // Mark all keys as MISS so we don't retry next render
+  for (const k of tryKeys) localStorage.setItem(`img:${k}`, "MISS");
+  return null;
+}
+
+// Backwards-compatible alias
+const lookupCropImage = lookupTaxonImage;
+
+function fmtEUR(v) {
+  if (v == null) return "—";
+  return new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(v);
+}
+
+function renderMetrics(m) {
+  const el = document.getElementById("metrics");
+  el.innerHTML = "";
+  const cell = (k, v, opts = {}) => {
+    const d = document.createElement("div");
+    d.className = "cell" + (opts.full ? " full" : "");
+    d.innerHTML = `<div class="k">${k}</div><div class="v">${v ?? "—"}</div>`;
+    if (opts.bar != null) {
+      const cls = opts.bar > 66 ? (opts.invert ? "bad" : "") : opts.bar > 33 ? "warn" : (opts.invert ? "" : "bad");
+      const bar = document.createElement("div");
+      bar.className = "bar " + cls;
+      bar.innerHTML = `<div style="width:${Math.max(0, Math.min(100, opts.bar))}%"></div>`;
+      d.appendChild(bar);
+    }
+    el.appendChild(d);
+  };
+  const id = m.identification || {};
+  const ps = m.parcels_summary || {};
+  const h  = m.health || {};
+  const ph = m.phenology || {};
+  const y  = m.yield || {};
+  const mk = m.market || {};
+
+  cell("Culture dominante", `<span id="crop-ref-slot" style="float:right;width:56px;height:56px;background:var(--panel);border:1px solid var(--border);border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-size:9px;color:var(--muted);margin-left:8px">…</span>${id.dominant_crop_fr ?? "—"}${id.scientific_name ? ` <span class="small">(${id.scientific_name})</span>` : ""}`, { full: true });
+  // Async lookup of a reference photo.
+  if (id.dominant_crop_fr || id.scientific_name) {
+    lookupCropImage(id.scientific_name, id.dominant_crop_fr).then(res => {
+      const slot = document.getElementById("crop-ref-slot");
+      if (!slot) return;
+      if (res?.url) {
+        slot.innerHTML = `<a href="${res.url}" target="_blank" title="Photo de référence — ${res.source}"><img src="${res.url}" style="width:100%;height:100%;object-fit:cover;border-radius:3px" /></a>`;
+        slot.style.padding = "0";
+      } else {
+        slot.textContent = "pas de réf.";
+      }
+    });
+  }
+  cell("Confiance détection", id.confidence_0_1 != null ? Math.round(id.confidence_0_1*100)+" %" : "—", { bar: (id.confidence_0_1 ?? 0)*100 });
+  cell("Parcelles", `${ps.count ?? "—"} (${ps.total_area_ha != null ? ps.total_area_ha.toFixed(2)+" ha" : "?"})`);
+  cell("Vigueur", h.vigor_0_100 ?? "—", { bar: h.vigor_0_100 });
+  cell("Pression maladies", h.disease_pressure_0_100 ?? "—", { bar: h.disease_pressure_0_100, invert: true });
+  cell("Stade", ph.current_stage);
+  cell("Maturité", ph.maturity_pct != null ? ph.maturity_pct+" %" : "—", { bar: ph.maturity_pct });
+  cell("Récolte attendue", `${formatRelativeDays(ph.expected_harvest_in_days)}${ph.expected_harvest_window_iso ? ` <span class="small">(${ph.expected_harvest_window_iso})</span>` : ""}`, { full: true });
+  cell("Rendement t/ha", y.estimated_t_per_ha != null ? y.estimated_t_per_ha.toFixed(1) : "—");
+  cell("Production totale", y.estimated_total_t != null ? y.estimated_total_t.toFixed(1)+" t" : "—");
+  cell("Prix indicatif", mk.indicative_price_eur_per_kg != null ? mk.indicative_price_eur_per_kg.toFixed(2)+" €/kg" : "—");
+  cell("Valeur estimée", fmtEUR(mk.estimated_total_value_eur), { full: false });
+  if (Array.isArray(ps.crops_breakdown) && ps.crops_breakdown.length > 1) {
+    const txt = ps.crops_breakdown.map(c => `${CULTU_LABELS[c.code_cultu] || c.code_cultu}: ${c.area_ha?.toFixed(2)} ha (${c.share_pct?.toFixed(0)}%)`).join(" · ");
+    cell("Répartition cultures", txt, { full: true });
+  }
+  const obs = (h.spatial_observations || []).map(o => `photo ${o.photo_index}: ${o.observation}`).join(" · ");
+  if (obs) cell("Observations terrain", obs, { full: true });
+  if (mk.source_hint || mk.notes) cell("Marché", `${mk.source_hint || ""} ${mk.notes || ""}`.trim(), { full: true });
+  if (m.notes) cell("Notes", m.notes, { full: true });
+}
+
+function treatmentTotalCost(t) {
+  const c = t.cost_breakdown || {};
+  const mat = c.materials_eur_per_ha ?? 0;
+  const equip = c.equipment_eur_per_ha ?? 0;
+  const prep = c.prep_time_h_per_ha ?? 0;
+  const apply = c.application_time_h_per_ha ?? 0;
+  const rate = c.labor_eur_per_h ?? 0;
+  const labor = (prep + apply) * rate;
+  return { total: mat + labor + equip, materials: mat, labor, equipment: equip,
+           prep, apply, rate, totalTime: prep + apply };
+}
+
+function renderDiseases(diseases, ctx) {
+  const el = document.getElementById("diseases");
+  if (!Array.isArray(diseases) || diseases.length === 0) {
+    el.innerHTML = `<div class="small">Aucune maladie listée par le modèle.</div>`;
+    return;
+  }
+  el.innerHTML = "";
+  const tPerHa = ctx?.t_per_ha;
+  const pricePerKg = ctx?.price_eur_per_kg;
+  const cropValuePerHa = (tPerHa && pricePerKg) ? tPerHa * 1000 * pricePerKg : null;
+
+  diseases
+    .slice()
+    .sort((a, b) => (b.presence_probability_0_1 ?? 0) - (a.presence_probability_0_1 ?? 0))
+    .forEach((d, di) => {
+      const card = document.createElement("div");
+      card.className = "disease";
+      const prob = d.presence_probability_0_1 != null ? Math.round(d.presence_probability_0_1*100) : null;
+      const impact = d.yield_impact_pct_if_untreated;
+
+      const treatments = (d.treatments || []).map((t, ti) => {
+        const cost = treatmentTotalCost(t);
+        // Net impact after treatment: impact + recovery (e.g. -35 + 18 = -17)
+        const newImpact = (impact != null && t.recovery_pct != null) ? impact + t.recovery_pct : null;
+        // Expected benefit (probabilistic): presence_prob × recovery × crop_value − treatment_cost
+        let benefitTxt = "—", benefitClass = "";
+        if (cropValuePerHa != null && t.recovery_pct != null && d.presence_probability_0_1 != null) {
+          const expRecovery = (t.recovery_pct / 100) * cropValuePerHa * d.presence_probability_0_1;
+          const net = expRecovery - cost.total;
+          benefitTxt = (net >= 0 ? "+" : "") + fmtEUR(net) + "/ha";
+          benefitClass = net >= 0 ? "color:var(--accent)" : "color:var(--bad)";
+        } else if (cropValuePerHa == null) {
+          benefitTxt = `Manque ${tPerHa ? "prix" : "rendement"} pour calculer`;
+        }
+
+        const detailsId = `tx-d-${di}-${ti}`;
+        return `
+          <li>
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+              <div><b>${t.name}</b>${t.name_local ? ` <span class="small" style="color:var(--accent)">≈ ${t.name_local}</span>` : ""} <span class="small">(${t.type ?? "?"})</span></div>
+              <div style="font-weight:600">${fmtEUR(cost.total)}/ha</div>
+            </div>
+            <div class="small" style="margin-top:2px">
+              Succès ${t.success_probability_0_1 != null ? Math.round(t.success_probability_0_1*100)+" %" : "—"} ·
+              ${impact != null && newImpact != null ? `Impact ${impact}% → ${newImpact}%` : `Récup. +${t.recovery_pct ?? "?"}%`} ·
+              <span style="${benefitClass}">Bénéfice espéré ${benefitTxt}</span>
+            </div>
+            <button class="secondary" data-toggle="${detailsId}" style="font-size:10px;padding:2px 6px;margin-top:4px">Détails</button>
+            <div id="${detailsId}" style="display:none;margin-top:6px;padding:6px;background:var(--panel);border-radius:4px;font-size:11px">
+              <div>Intrants : ${fmtEUR(cost.materials)}/ha</div>
+              <div>Main d'œuvre : ${cost.totalTime.toFixed(1)} h × ${fmtEUR(cost.rate)}/h = ${fmtEUR(cost.labor)}/ha
+                <span class="small">(prép. ${cost.prep.toFixed(1)} h + applic. ${cost.apply.toFixed(1)} h)</span></div>
+              <div>Matériel / carburant / EPI : ${fmtEUR(cost.equipment)}/ha</div>
+              <div style="border-top:1px solid var(--border);margin-top:4px;padding-top:4px"><b>Total ${fmtEUR(cost.total)}/ha</b></div>
+              ${ctx?.total_area_ha ? `<div class="small">Sur ${ctx.total_area_ha.toFixed(2)} ha : ${fmtEUR(cost.total * ctx.total_area_ha)} total</div>` : ""}
+            </div>
+          </li>`;
+      }).join("");
+
+      const refId = `dis-ref-${di}`;
+      card.innerHTML = `
+        <div class="head">
+          <div style="display:flex;gap:8px;align-items:flex-start">
+            <span id="${refId}" style="width:48px;height:48px;background:var(--panel);border:1px solid var(--border);border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-size:9px;color:var(--muted);flex-shrink:0">…</span>
+            <div><span class="name">${d.name_fr ?? "?"}</span>${d.name_local ? ` <span style="color:var(--accent);font-size:11px">≈ ${d.name_local}</span>` : ""} <span class="sci">${d.scientific ?? ""}</span></div>
+          </div>
+          <div style="font-size:11px">${prob != null ? prob + "% prob." : ""}</div>
+        </div>
+        <div class="row2">
+          <div><span class="k">Probabilité présence</span><div class="bar ${prob > 66 ? "bad" : prob > 33 ? "warn" : ""}"><div style="width:${prob ?? 0}%"></div></div></div>
+          <div><span class="k">Impact si non traité</span><div style="font-weight:600;color:var(--bad)">${impact != null ? impact + " %" : "—"}</div></div>
+        </div>
+        ${treatments ? `<div class="tx"><h4>Traitements possibles</h4><ul style="list-style:none;padding-left:0;margin:0">${treatments}</ul></div>` : ""}
+      `;
+      el.appendChild(card);
+
+      // Async disease image lookup
+      if (d.scientific || d.name_fr) {
+        lookupTaxonImage(d.scientific, d.name_fr, {}).then(res => {
+          const slot = document.getElementById(refId);
+          if (!slot) return;
+          if (res?.url) {
+            slot.innerHTML = `<a href="${res.url}" target="_blank" title="${d.scientific ?? d.name_fr} — ${res.source}"><img src="${res.url}" style="width:100%;height:100%;object-fit:cover;border-radius:3px" /></a>`;
+            slot.style.padding = "0";
+          } else {
+            slot.textContent = "?";
+            slot.title = "Aucune image trouvée";
+          }
+        });
+      }
+    });
+
+  // Wire details toggles
+  el.querySelectorAll("[data-toggle]").forEach(btn => {
+    btn.onclick = () => {
+      const target = document.getElementById(btn.dataset.toggle);
+      const open = target.style.display !== "none";
+      target.style.display = open ? "none" : "block";
+      btn.textContent = open ? "Détails" : "Masquer";
+    };
+  });
+}
+
+// Stable system prompt — cached across calls (Anthropic prompt caching).
+const SYSTEM_PROMPT = `Tu es un agronome expert spécialisé dans l'identification de cultures, l'évaluation phytosanitaire et l'estimation économique à partir de photos de terrain, avec une connaissance fine du contexte agricole français (métropole + DOM-TOM : Réunion, Antilles, Guyane, Mayotte) et des marchés RNM FranceAgriMer.
+
+Entrées que tu reçois :
+- 1 à N photos numérotées (l'ordre = la numérotation 1..N affichée à l'utilisateur)
+- Un contexte de localisation : adresse, coordonnées, hémisphère, saison
+- Une sélection de parcelles RPG (catégorie, code culture officiel, surface en ha, mode bio)
+- Les positions géographiques des photos quand connues (EXIF ou pointage manuel)
+
+Méthode :
+1. **Identification** : nom commun FR + nom scientifique de la culture dominante. Croiser TOUS les indices : forme générale, feuille, fruit, port, densité, paysage. Le code culture RPG est un prior fort — si discordant avec la photo, signale-le dans notes.
+2. **Cohérence géo/climat** : banane → DOM tropical ; canne à sucre → Réunion/Antilles ; vigne → vignobles métro ; etc. Adapte rendements et phénologie en conséquence.
+3. **Phénologie** : stade BBCH ou stade vulgarisé + % maturité. La date courante + hémisphère déterminent la fenêtre de récolte. Renvoie expected_harvest_in_days RELATIF à aujourd'hui (positif = futur, négatif = passé).
+4. **Santé** : vigueur 0-100 et pression maladie 0-100 globaux. Pour spatial_observations, indique POUR CHAQUE photo numérotée ce qui est observable (zones saines vs malades). Cela permet de localiser sur la carte les zones problématiques.
+5. **Rendement et valeur** : t/ha selon référentiels FR pour l'espèce/région. Multiplie par la surface RPG totale pour estimated_total_t et estimated_total_value_eur.
+6. **Prix** : ordre de grandeur RNM FranceAgriMer (gros, départ producteur) pour la saison/région.
+7. **Maladies (section diseases)** : liste les 3 à 6 maladies/ravageurs les plus pertinents pour l'espèce+région+saison. Pour chacune :
+   - name_fr : nom commun français standard
+   - name_local : si le contexte indique un dialecte (rcf=créole réunionnais, gcf=créole antillais), donner le nom vernaculaire utilisé localement par les agriculteurs ; null sinon ou si aucun terme local n'est attesté (ne PAS inventer un mot créole non documenté)
+   - presence_probability_0_1 : combine signes visibles ET risque climatique saisonnier
+   - yield_impact_pct_if_untreated : impact rendement si non traitée (négatif, ex -25 pour -25%)
+   - treatments : 1-3 options réalistes (chimique homologuée FR, biologique, agronomique). Idem pour name_local sur le nom du traitement. Pour chaque :
+     • success_probability_0_1 : probabilité que le traitement fonctionne
+     • recovery_pct : points de rendement récupérés (positif, ex +18 signifie +18% vs non traité)
+     • cost_breakdown : décompose le coût TOTAL en intrants + main d'œuvre + matériel :
+       - materials_eur_per_ha : produits/intrants (€/ha)
+       - prep_time_h_per_ha : heures de préparation par ha (mélange, calibrage, transport)
+       - application_time_h_per_ha : heures d'application par ha (passage tracteur, pulvérisation)
+       - labor_eur_per_h : coût horaire main d'œuvre (FR ~25 €/h par défaut, SMIC chargé)
+       - equipment_eur_per_ha : amortissement matériel, carburant, EPI
+8. **Honnêteté** : si non évaluable, abaisse la confiance, n'invente PAS de chiffres précis.
+
+**Format de sortie : UNIQUEMENT du JSON valide, conforme au schéma. Pas de markdown, pas de \`\`\`, pas de texte avant/après. Toutes les clés du schéma présentes (null si vraiment indéterminé).**
+
+Exemple illustratif (vigne en Gironde, ne pas recopier) :
+{"identification":{"dominant_crop_fr":"vigne","scientific_name":"Vitis vinifera","confidence_0_1":0.92},"parcels_summary":{"count":2,"total_area_ha":3.2,"crops_breakdown":[{"code_cultu":"VRC","area_ha":3.2,"share_pct":100}]},"health":{"vigor_0_100":72,"disease_pressure_0_100":22,"spatial_observations":[{"photo_index":1,"observation":"vue d'ensemble homogène, feuillage vert mat"},{"photo_index":2,"observation":"taches huileuses caractéristiques mildiou sur feuilles basses"}]},"phenology":{"current_stage":"véraison (BBCH 81)","maturity_pct":68,"expected_harvest_in_days":95,"expected_harvest_window_iso":"2026-09"},"yield":{"estimated_t_per_ha":7.2,"estimated_total_t":23.0,"confidence_0_1":0.55},"market":{"indicative_price_eur_per_kg":1.25,"estimated_total_value_eur":28800,"source_hint":"RNM — raisin de cuve AOC Bordeaux 2025","notes":"prix vendange vrac, varie selon appellation"},"diseases":[{"name_fr":"Mildiou de la vigne","scientific":"Plasmopara viticola","presence_probability_0_1":0.7,"yield_impact_pct_if_untreated":-30,"treatments":[{"name":"Cuivre (bouillie bordelaise)","type":"biologique","success_probability_0_1":0.75,"recovery_pct":22,"cost_breakdown":{"materials_eur_per_ha":35,"prep_time_h_per_ha":0.5,"application_time_h_per_ha":1.2,"labor_eur_per_h":25,"equipment_eur_per_ha":15}},{"name":"Fosétyl-aluminium","type":"chimique","success_probability_0_1":0.9,"recovery_pct":28,"cost_breakdown":{"materials_eur_per_ha":55,"prep_time_h_per_ha":0.3,"application_time_h_per_ha":1.0,"labor_eur_per_h":25,"equipment_eur_per_ha":18}}]}],"notes":"estimation visuelle uniquement, sans analyse de sol ni historique parcellaire"}`;
+
+function seasonFromDate(d, lat) {
+  const m = d.getMonth() + 1;
+  const northern = lat >= 0;
+  const seasons = northern
+    ? { 12: "hiver", 1: "hiver", 2: "hiver", 3: "printemps", 4: "printemps", 5: "printemps", 6: "été", 7: "été", 8: "été", 9: "automne", 10: "automne", 11: "automne" }
+    : { 12: "été", 1: "été", 2: "été", 3: "automne", 4: "automne", 5: "automne", 6: "hiver", 7: "hiver", 8: "hiver", 9: "printemps", 10: "printemps", 11: "printemps" };
+  return seasons[m];
+}
+
+function buildContextBlock() {
+  const today = new Date();
+  const todayStr = today.toISOString().slice(0, 10);
+  const dialect = document.getElementById("dialect")?.value || "fr";
+  // Center on first selected parcel if any, else address, else map center.
+  let lat = currentAddress?.lat, lon = currentAddress?.lon;
+  if (selectedParcels.size > 0) {
+    const first = selectedParcels.values().next().value;
+    if (first.latlng) { lat = first.latlng[0]; lon = first.latlng[1]; }
+  }
+  if (lat == null) { const c = map.getCenter(); lat = c.lat; lon = c.lng; }
+
+  const lines = [`Date du jour : ${todayStr}`, `Dialecte demandé (ISO 639-3) : ${dialect}`];
+  if (currentAddress) {
+    lines.push(`Adresse géocodée : ${currentAddress.label}`);
+    if (currentAddress.context) lines.push(`Département / région : ${currentAddress.context}`);
+  }
+  lines.push(`Coordonnées de référence : ${lat.toFixed(5)}, ${lon.toFixed(5)} (hémisphère ${lat >= 0 ? "nord" : "sud"})`);
+  lines.push(`Saison courante : ${seasonFromDate(today, lat)}`);
+
+  if (selectedParcels.size > 0) {
+    const { totalArea, byCrop } = aggregateParcels();
+    lines.push(`\nParcelles RPG sélectionnées (${selectedParcels.size}, total ${totalArea.toFixed(2)} ha) :`);
+    Object.entries(byCrop).forEach(([code, agg]) => {
+      const label = CULTU_LABELS[code] || code;
+      lines.push(`  - ${label} [code_cultu=${code}, catégorie=${agg.category}] : ${agg.count} parcelle(s), ${agg.area.toFixed(2)} ha${agg.bio ? `, dont ${agg.bio} en bio` : ""}`);
+    });
+  } else {
+    lines.push("Aucune parcelle RPG sélectionnée — pas de prior officiel sur la culture.");
+  }
+
+  if (photos.length > 0) {
+    lines.push(`\nPhotos (${photos.length}, ordre = numérotation) :`);
+    photos.forEach((p, i) => {
+      const loc = p.lat != null
+        ? `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)} (${p.locSource})`
+        : "position non renseignée";
+      const dir = p.direction != null
+        ? `, prise vers ${Math.round(p.direction)}° (${cardinal(p.direction)})`
+        : "";
+      const when = p.takenAt
+        ? `, prise le ${p.takenAt.toISOString().slice(0, 16).replace("T", " ")}`
+        : "";
+      lines.push(`  ${i+1}. ${p.name} — ${loc}${dir}${when}`);
+    });
+  }
+
+  return lines.join("\n");
+}
+
+// Hash of inputs that would change the analysis output.
+function inputFingerprint() {
+  const parts = [
+    currentAddress?.label || "",
+    [...selectedParcels.keys()].sort().join("|"),
+    photos.map(p => `${p.id}@${p.lat ?? "?"},${p.lon ?? "?"}|${p.direction ?? "?"}`).sort().join("||"),
+    document.getElementById("dialect")?.value || "fr"
+  ];
+  return parts.join("§");
+}
+let lastAnalyzedFingerprint = null;
+
+function updateAnalyzeAvailability() {
+  const fp = inputFingerprint();
+  const hasPhotos = photos.length > 0;
+  const sameAsLast = lastAnalyzedFingerprint != null && fp === lastAnalyzedFingerprint;
+  const disabled = !hasPhotos || sameAsLast;
+  analyzeBtn.disabled = disabled;
+  if (!hasPhotos) {
+    aStatus.textContent = aStatus.textContent.includes("recompressée") ? aStatus.textContent : "";
+  } else if (sameAsLast) {
+    aStatus.textContent = "Analyse à jour — modifie une photo/parcelle pour relancer.";
+  } else if (lastAnalyzedFingerprint != null) {
+    aStatus.textContent = "Données modifiées — relance disponible.";
+  }
+}
+
+async function analyze() {
+  if (!WORKER_URL && !ANTHROPIC_API_KEY) {
+    aStatus.textContent = "Configure WORKER_URL (recommandé) ou ANTHROPIC_API_KEY dans index.html.";
+    return;
+  }
+  if (photos.length === 0) return;
+  analyzeBtn.disabled = true;
+  aStatus.textContent = `Analyse de ${photos.length} photo(s)…`;
+
+  const userText = `${buildContextBlock()}
+
+Schéma JSON cible (chaque valeur décrit le type/format attendu) :
+${JSON.stringify(METRIC_SCHEMA, null, 2)}
+
+Consigne : analyse les ${photos.length} photo(s) ci-dessus et renvoie UNIQUEMENT le JSON rempli, conforme au schéma. Pas de markdown, pas de texte hors JSON.`;
+
+  // Photos first (vision quality is better when images precede the question), then context.
+  const content = [
+    ...photos.map(p => ({
+      type: "image",
+      source: { type: "base64", media_type: p.mime, data: p.b64 }
+    })),
+    { type: "text", text: userText }
+  ];
+
+  const payload = JSON.stringify({
+    model: ANTHROPIC_MODEL,
+    max_tokens: 2000,
+    system: [
+      { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }
+    ],
+    messages: [{ role: "user", content }]
+  });
+
+  const useWorker = !!WORKER_URL;
+  const url = useWorker ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze` : "https://api.anthropic.com/v1/messages";
+  const headers = useWorker
+    ? { "content-type": "application/json", "anthropic-version": "2023-06-01" }
+    : {
+        "content-type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true"
+      };
+
+  try {
+    const r = await fetch(url, { method: "POST", headers, body: payload });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+    const text = j.content?.[0]?.text || "";
+    document.getElementById("raw").textContent = text;
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch {
+      const m = text.match(/\{[\s\S]*\}/);
+      if (m) parsed = JSON.parse(m[0]); else throw new Error("Réponse non-JSON");
+    }
+    // Authoritative override from RPG aggregation when parcels are selected.
+    if (selectedParcels.size > 0) {
+      const { totalArea, byCrop } = aggregateParcels();
+      parsed.parcels_summary = parsed.parcels_summary || {};
+      parsed.parcels_summary.count = selectedParcels.size;
+      parsed.parcels_summary.total_area_ha = totalArea;
+      parsed.parcels_summary.crops_breakdown = Object.entries(byCrop).map(([code, a]) => ({
+        code_cultu: code, area_ha: a.area, share_pct: totalArea > 0 ? (a.area / totalArea) * 100 : 0
+      }));
+      if (parsed.yield?.estimated_t_per_ha && totalArea > 0) {
+        parsed.yield.estimated_total_t = parsed.yield.estimated_t_per_ha * totalArea;
+        if (parsed.market?.indicative_price_eur_per_kg) {
+          parsed.market.estimated_total_value_eur =
+            parsed.yield.estimated_total_t * 1000 * parsed.market.indicative_price_eur_per_kg;
+        }
+      }
+    }
+    renderMetrics(parsed);
+    renderDiseases(parsed.diseases, {
+      t_per_ha: parsed.yield?.estimated_t_per_ha,
+      price_eur_per_kg: parsed.market?.indicative_price_eur_per_kg,
+      total_area_ha: parsed.parcels_summary?.total_area_ha
+    });
+    lastAnalyzedFingerprint = inputFingerprint();
+    aStatus.textContent = "OK — analyse à jour.";
+    updateAnalyzeAvailability();
+  } catch (e) {
+    aStatus.textContent = "Erreur : " + e.message;
+  } finally {
+    analyzeBtn.disabled = false;
+  }
+}
+analyzeBtn.addEventListener("click", analyze);
+
+// PWA: register service worker (only works over http(s) or localhost; silently noops on file://).
+if ("serviceWorker" in navigator && location.protocol !== "file:") {
+  navigator.serviceWorker.register("./sw.js").catch(e => console.warn("SW reg failed:", e));
+}
+
+// Dialect dropdown: persist, re-evaluate Analyser availability on change.
+const dialectEl = document.getElementById("dialect");
+dialectEl.value = localStorage.getItem("agri_dialect") || "fr";
+dialectEl.addEventListener("change", () => {
+  localStorage.setItem("agri_dialect", dialectEl.value);
+  updateAnalyzeAvailability();
+});
+
+// ============ Dropbox persistence (PKCE OAuth, App-folder scope) ============
+const DBX = (() => {
+  const LS = {
+    token: "dbx_token",
+    refresh: "dbx_refresh",
+    verifier: "dbx_verifier",
+    session: "agri_culture_id",
+    crop: "agri_culture_crop",
+    uploaded: "agri_uploaded_photos"  // photoId → true (per culture)
+  };
+  const state = {
+    enabled: !!DROPBOX_APP_KEY,
+    token: localStorage.getItem(LS.token) || null,
+    refresh: localStorage.getItem(LS.refresh) || null,
+    sessionId: localStorage.getItem(LS.session) || null,
+    cropCode: localStorage.getItem(LS.crop) || null,  // path prefix /crops/<cropCode>/cultures/<id>
+    uploaded: JSON.parse(localStorage.getItem(LS.uploaded) || "{}"),
+    lastAnalysis: null
+  };
+
+  // Dominant crop = largest area in current selection, else "UNK".
+  function dominantCropFromSelection() {
+    if (selectedParcels.size === 0) return "UNK";
+    const totals = {};
+    for (const [, p] of selectedParcels) {
+      const code = p.props?.code_cultu || "UNK";
+      totals[code] = (totals[code] || 0) + parcelArea(p.props);
+    }
+    return Object.entries(totals).sort((a, b) => b[1] - a[1])[0][0];
+  }
+  function basePath() {
+    const crop = state.cropCode || "UNK";
+    return `/crops/${crop}/cultures/${state.sessionId}`;
+  }
+
+  function genSessionId() {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, "0");
+    const rand = Math.random().toString(36).slice(2, 6);
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}_${rand}`;
+  }
+  function ensureSession() {
+    if (!state.sessionId) {
+      state.sessionId = genSessionId();
+      state.uploaded = {};
+      localStorage.setItem(LS.session, state.sessionId);
+      localStorage.setItem(LS.uploaded, "{}");
+    }
+    // Lock in cropCode at first save (sticky path; "Nouvelle culture" resets it).
+    if (!state.cropCode) {
+      state.cropCode = dominantCropFromSelection();
+      localStorage.setItem(LS.crop, state.cropCode);
+    }
+    return state.sessionId;
+  }
+  function resetSession() {
+    state.sessionId = null;
+    state.cropCode = null;
+    state.uploaded = {};
+    localStorage.removeItem(LS.session);
+    localStorage.removeItem(LS.crop);
+    localStorage.removeItem(LS.uploaded);
+  }
+  function persistUploaded() {
+    localStorage.setItem(LS.uploaded, JSON.stringify(state.uploaded));
+  }
+
+  // PKCE helpers
+  function b64url(buf) {
+    return btoa(String.fromCharCode(...new Uint8Array(buf)))
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function randomVerifier() {
+    const a = new Uint8Array(64); crypto.getRandomValues(a);
+    return b64url(a);
+  }
+  async function challengeFor(verifier) {
+    const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+    return b64url(hash);
+  }
+
+  async function startAuth() {
+    const verifier = randomVerifier();
+    sessionStorage.setItem(LS.verifier, verifier);
+    const challenge = await challengeFor(verifier);
+    const params = new URLSearchParams({
+      client_id: DROPBOX_APP_KEY,
+      response_type: "code",
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      token_access_type: "offline"
+    });
+    if (DROPBOX_REDIRECT_URI) params.set("redirect_uri", DROPBOX_REDIRECT_URI);
+    const url = `https://www.dropbox.com/oauth2/authorize?${params}`;
+    window.open(url, "_blank", "noopener");
+  }
+
+  async function exchangeCode(code) {
+    const verifier = sessionStorage.getItem(LS.verifier);
+    if (!verifier) throw new Error("Code verifier introuvable (relancer la connexion).");
+    const body = new URLSearchParams({
+      code, grant_type: "authorization_code",
+      client_id: DROPBOX_APP_KEY, code_verifier: verifier
+    });
+    if (DROPBOX_REDIRECT_URI) body.set("redirect_uri", DROPBOX_REDIRECT_URI);
+    const r = await fetch("https://api.dropboxapi.com/oauth2/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error_description || j.error_summary || JSON.stringify(j));
+    state.token = j.access_token;
+    state.refresh = j.refresh_token || null;
+    localStorage.setItem(LS.token, state.token);
+    if (state.refresh) localStorage.setItem(LS.refresh, state.refresh);
+    sessionStorage.removeItem(LS.verifier);
+  }
+
+  async function refreshToken() {
+    if (!state.refresh) return false;
+    const r = await fetch("https://api.dropboxapi.com/oauth2/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: state.refresh,
+        client_id: DROPBOX_APP_KEY
+      })
+    });
+    if (!r.ok) return false;
+    const j = await r.json();
+    state.token = j.access_token;
+    localStorage.setItem(LS.token, state.token);
+    return true;
+  }
+
+  async function dbxFetch(url, opts, retry = true) {
+    const res = await fetch(url, {
+      ...opts,
+      headers: { ...(opts.headers || {}), "Authorization": `Bearer ${state.token}` }
+    });
+    if (res.status === 401 && retry && state.refresh) {
+      const ok = await refreshToken();
+      if (ok) return dbxFetch(url, opts, false);
+    }
+    return res;
+  }
+
+  function disconnect() {
+    state.token = null; state.refresh = null;
+    localStorage.removeItem(LS.token);
+    localStorage.removeItem(LS.refresh);
+  }
+
+  async function uploadFile(path, body, mode = "overwrite") {
+    const args = JSON.stringify({ path, mode, autorename: false, mute: true });
+    const r = await dbxFetch("https://content.dropboxapi.com/2/files/upload", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Dropbox-API-Arg": args
+      },
+      body
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error(`Upload ${path} failed: ${r.status} ${t.slice(0, 200)}`);
+    }
+    return r.json();
+  }
+
+  // ===== Public: save the current session =====
+  let saveTimer = null;
+  let saveInFlight = null;
+  function bytesFromB64(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  async function saveNow() {
+    if (!state.enabled || !state.token) return;
+    ensureSession();
+    const base = basePath();
+
+    // Upload any new photos.
+    for (const p of photos) {
+      if (state.uploaded[p.id]) continue;
+      const ext = (p.mime || "image/jpeg").split("/")[1] || "jpg";
+      try {
+        await uploadFile(`${base}/photos/${p.id}.${ext}`, bytesFromB64(p.b64));
+        state.uploaded[p.id] = { name: p.name, mime: p.mime };
+        persistUploaded();
+      } catch (e) {
+        renderPanel(`Erreur photo : ${e.message}`);
+        return;
+      }
+    }
+    // Drop entries for photos no longer present.
+    const currentIds = new Set(photos.map(p => p.id));
+    for (const id of Object.keys(state.uploaded)) {
+      if (!currentIds.has(id)) delete state.uploaded[id];
+    }
+    persistUploaded();
+
+    // Build manifest (no base64 — photo bytes already uploaded).
+    const manifest = {
+      schema: 2,
+      culture_id: state.sessionId,
+      crop_code: state.cropCode,
+      saved_at: new Date().toISOString(),
+      address: currentAddress,
+      parcels: [...selectedParcels.values()].map(p => ({
+        props: p.props,
+        geometry: p.geometry,
+        latlng: p.latlng
+      })),
+      photos: photos.map(p => ({
+        id: p.id, name: p.name, mime: p.mime,
+        width: p.width, height: p.height,
+        lat: p.lat, lon: p.lon, locSource: p.locSource,
+        direction: p.direction,
+        takenAt: p.takenAt ? p.takenAt.toISOString() : null,
+        file: `photos/${p.id}.${(p.mime || "image/jpeg").split("/")[1] || "jpg"}`
+      })),
+      analysis: state.lastAnalysis
+    };
+    try {
+      await uploadFile(`${base}/culture.json`, new TextEncoder().encode(JSON.stringify(manifest, null, 2)));
+      renderPanel(`✓ Sauvegardé ${new Date().toLocaleTimeString("fr-FR")} (${manifest.parcels.length} parc., ${manifest.photos.length} ph.)`);
+    } catch (e) {
+      renderPanel(`Erreur manifeste : ${e.message}`);
+    }
+  }
+
+  function schedule() {
+    if (!state.enabled || !state.token || state.suspendSave) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveInFlight = saveNow().catch(e => console.error(e)).finally(() => { saveInFlight = null; });
+    }, 1500);
+  }
+
+  async function listSessions() {
+    // Recursive listing of /crops; pick out folders at depth 2 (= cultures).
+    const r = await dbxFetch("https://api.dropboxapi.com/2/files/list_folder", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "/crops", recursive: true })
+    });
+    if (r.status === 409) return [];
+    if (!r.ok) throw new Error("list_folder " + r.status);
+    const j = await r.json();
+    const cultures = [];
+    for (const e of (j.entries || [])) {
+      if (e[".tag"] !== "folder") continue;
+      const parts = e.path_display.split("/").filter(Boolean);  // ["crops","BAN","cultures","2026-..."]
+      if (parts.length === 4 && parts[0] === "crops" && parts[2] === "cultures") {
+        cultures.push({ crop: parts[1], id: parts[3], path: e.path_display });
+      }
+    }
+    return cultures.sort((a, b) => b.id.localeCompare(a.id));
+  }
+
+  async function downloadFile(path) {
+    const r = await dbxFetch("https://content.dropboxapi.com/2/files/download", {
+      method: "POST",
+      headers: { "Dropbox-API-Arg": JSON.stringify({ path }) }
+    });
+    if (!r.ok) throw new Error(`download ${path}: ${r.status}`);
+    return r;
+  }
+
+  async function loadSession(cropCode, sid) {
+    state.suspendSave = true;
+    try {
+      const r = await downloadFile(`/crops/${cropCode}/cultures/${sid}/culture.json`);
+      const manifest = await r.json();
+
+      // Clear current state
+      photos.forEach(p => { if (p.marker) map.removeLayer(p.marker); if (p.fovLayer) map.removeLayer(p.fovLayer); });
+      photos.length = 0;
+      selectedParcels.clear();
+      renderParcelHighlight();
+
+      // Address
+      if (manifest.address) {
+        currentAddress = manifest.address;
+        document.getElementById("addr").value = manifest.address.label || "";
+        document.getElementById("status").textContent = manifest.address.label || "";
+        if (manifest.address.lat) map.setView([manifest.address.lat, manifest.address.lon], 15);
+      }
+
+      // Parcels
+      for (const p of (manifest.parcels || [])) {
+        const id = featureKey({ properties: p.props });
+        selectedParcels.set(id, { props: p.props, geometry: p.geometry, latlng: p.latlng });
+      }
+      renderParcelHighlight();
+      renderParcelInfoPanel();
+      updateLockHint();
+
+      // Photos: download each blob and rehydrate
+      for (const meta of (manifest.photos || [])) {
+        try {
+          const pr = await downloadFile(`/crops/${cropCode}/cultures/${sid}${meta.file.startsWith("/") ? meta.file : "/" + meta.file}`);
+          const blob = await pr.blob();
+          const dataUrl = await new Promise((res, rej) => {
+            const rd = new FileReader(); rd.onload = () => res(rd.result); rd.onerror = rej; rd.readAsDataURL(blob);
+          });
+          const photo = {
+            id: meta.id, name: meta.name, mime: meta.mime || blob.type || "image/jpeg",
+            b64: dataUrl.split(",")[1], dataUrl,
+            width: meta.width, height: meta.height,
+            lat: meta.lat, lon: meta.lon, locSource: meta.locSource,
+            direction: meta.direction,
+            takenAt: meta.takenAt ? new Date(meta.takenAt) : null,
+            exifFound: true, recompressed: false,
+            marker: null, fovLayer: null
+          };
+          photos.push(photo);
+          // Mark as already uploaded so it doesn't re-upload on next save
+          state.uploaded[photo.id] = { name: photo.name, mime: photo.mime };
+          if (photo.lat != null) placePhotoMarker(photo);
+        } catch (e) {
+          console.warn("photo reload failed", meta.file, e);
+        }
+      }
+      persistUploaded();
+      renderPhotos();
+
+      // Analysis
+      if (manifest.analysis) {
+        renderMetrics(manifest.analysis);
+        renderDiseases(manifest.analysis.diseases, {
+          t_per_ha: manifest.analysis.yield?.estimated_t_per_ha,
+          price_eur_per_kg: manifest.analysis.market?.indicative_price_eur_per_kg,
+          total_area_ha: manifest.analysis.parcels_summary?.total_area_ha
+        });
+        state.lastAnalysis = manifest.analysis;
+        lastAnalyzedFingerprint = inputFingerprint();
+      }
+
+      // Adopt the loaded culture as current
+      state.sessionId = sid;
+      state.cropCode = cropCode;
+      localStorage.setItem(LS.session, sid);
+      localStorage.setItem(LS.crop, cropCode);
+      analyzeBtn.disabled = photos.length === 0;
+      updateAnalyzeAvailability();
+      // Center the map on what we just loaded.
+      if (selectedParcels.size > 0) fitToSelectedParcels();
+      else if (currentAddress?.lat) map.setView([currentAddress.lat, currentAddress.lon], 15);
+      const cm = cropMeta(cropCode);
+      renderPanel(`Culture ${cm.emoji || ""} ${cm.fr || cropCode} — ${sid} rechargée.`);
+    } finally {
+      state.suspendSave = false;
+    }
+  }
+
+  function setAnalysis(parsed) {
+    state.lastAnalysis = parsed;
+    schedule();
+  }
+
+  // ===== Panel UI =====
+  const panel = document.getElementById("dbx-panel");
+  function renderPanel(extra) {
+    if (!state.enabled) {
+      panel.innerHTML = `Désactivé : configure <code>DROPBOX_APP_KEY</code> en haut du script.`;
+      return;
+    }
+    if (!state.token) {
+      panel.innerHTML = `
+        <button class="secondary" id="dbx-connect" style="font-size:11px;padding:4px 8px">☁ Connecter Dropbox</button>
+        <div id="dbx-code-row" style="display:none;margin-top:6px">
+          <input id="dbx-code" type="text" placeholder="Coller le code…" style="font-size:11px;padding:4px 6px" />
+          <button class="secondary" id="dbx-submit" style="font-size:11px;padding:4px 8px;margin-top:4px">Valider</button>
+        </div>
+        <div id="dbx-msg" class="small" style="margin-top:6px"></div>
+      `;
+      document.getElementById("dbx-connect").onclick = async () => {
+        await startAuth();
+        document.getElementById("dbx-code-row").style.display = "block";
+        document.getElementById("dbx-msg").textContent = "Autoriser dans l'onglet Dropbox puis coller le code ici.";
+      };
+      document.getElementById("dbx-submit").onclick = async () => {
+        const code = document.getElementById("dbx-code").value.trim();
+        if (!code) return;
+        try {
+          await exchangeCode(code);
+          renderPanel();
+          schedule();  // initial save
+        } catch (e) {
+          document.getElementById("dbx-msg").textContent = "Erreur : " + e.message;
+        }
+      };
+      return;
+    }
+    const cm = state.cropCode ? cropMeta(state.cropCode) : null;
+    const cultureLabel = state.sessionId
+      ? `${cm ? cm.emoji + " " + cm.fr + " · " : ""}<code>${state.sessionId}</code>`
+      : "(aucune culture active)";
+    panel.innerHTML = `
+      <div>✓ Connecté · ${cultureLabel}</div>
+      <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+        <button class="secondary" id="dbx-new"  style="font-size:11px;padding:4px 8px">Nouvelle</button>
+        <button class="secondary" id="dbx-save" style="font-size:11px;padding:4px 8px">Sauver</button>
+        <button class="secondary" id="dbx-load" style="font-size:11px;padding:4px 8px">Reprendre…</button>
+        <button class="secondary" id="dbx-disc" style="font-size:11px;padding:4px 8px">Déconnecter</button>
+      </div>
+      <div id="dbx-sessions" style="margin-top:6px"></div>
+      <div class="small" style="margin-top:6px">${extra || ""}</div>
+    `;
+    document.getElementById("dbx-new").onclick = () => { resetSession(); renderPanel("Nouvelle culture prête."); };
+    document.getElementById("dbx-save").onclick = () => saveNow();
+    document.getElementById("dbx-disc").onclick = () => { disconnect(); renderPanel(); };
+    document.getElementById("dbx-load").onclick = async () => {
+      const target = document.getElementById("dbx-sessions");
+      target.innerHTML = `<div class="small">Recherche…</div>`;
+      try {
+        const list = await listSessions();
+        if (list.length === 0) { target.innerHTML = `<div class="small">Aucune culture sauvegardée.</div>`; return; }
+        // Group by crop, ordered by latest culture in each group.
+        const byCrop = {};
+        for (const c of list) (byCrop[c.crop] ||= []).push(c);
+        const cropOrder = Object.entries(byCrop)
+          .map(([cc, items]) => [cc, items.sort((a, b) => b.id.localeCompare(a.id))[0].id])
+          .sort((a, b) => b[1].localeCompare(a[1]))
+          .map(([cc]) => cc);
+        const optgroups = cropOrder.map(cc => {
+          const cm = cropMeta(cc);
+          const opts = byCrop[cc].map(c => `<option value="${cc}|${c.id}">${c.id}</option>`).join("");
+          return `<optgroup label="${cm.emoji || ""} ${cm.fr || cc}">${opts}</optgroup>`;
+        }).join("");
+        target.innerHTML = `
+          <select id="dbx-sess-select" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--border);background:var(--panel2);color:var(--text);font-size:11px">
+            ${optgroups}
+          </select>
+          <button class="secondary" id="dbx-sess-go" style="font-size:11px;padding:4px 8px;margin-top:4px">Charger</button>
+        `;
+        document.getElementById("dbx-sess-go").onclick = async () => {
+          const [cc, sid] = document.getElementById("dbx-sess-select").value.split("|");
+          target.innerHTML = `<div class="small">Chargement…</div>`;
+          try { await loadSession(cc, sid); }
+          catch (e) { target.innerHTML = `<div class="small">Erreur : ${e.message}</div>`; }
+        };
+      } catch (e) {
+        target.innerHTML = `<div class="small">Erreur : ${e.message}</div>`;
+      }
+    };
+  }
+  renderPanel();
+
+  return { schedule, setAnalysis };
+})();
+
+// ===== Wire save triggers on every data change =====
+const _origPlace = placePhotoMarker;  // ensure marker re-renders don't loop
+function dbxOnChange() { DBX.schedule(); }
+
+// Patch photo lifecycle: existing handlers stay; we just observe via wrapping.
+const _origRenderPhotos = renderPhotos;
+// Hook: after any successful parcel toggle / photo add / placement / aim / delete,
+// the existing renderPhotos / renderParcelInfoPanel runs. We piggyback by also
+// scheduling a save + re-evaluating the Analyser button. MutationObserver is the cheapest way.
+function onInputsChanged() { dbxOnChange(); updateAnalyzeAvailability(); }
+new MutationObserver(onInputsChanged).observe(document.getElementById("thumbs"), { childList: true, subtree: true });
+new MutationObserver(onInputsChanged).observe(document.getElementById("parcel-info"), { childList: true, subtree: true });
+
+// After analysis succeeds, surface the parsed result to DBX so it's part of the next save.
+const _origAnalyze = analyze;
+window.analyze = analyze = async function () {
+  await _origAnalyze();
+  // The last parsed analysis JSON is rendered into #raw; pick it up.
+  try {
+    const txt = document.getElementById("raw").textContent;
+    if (txt) DBX.setAnalysis(JSON.parse(txt));
+  } catch {}
+};
+analyzeBtn.removeEventListener?.("click", _origAnalyze);
+analyzeBtn.addEventListener("click", analyze);
+</script>
+</body>
+</html>

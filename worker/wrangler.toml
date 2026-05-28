@@ -1,0 +1,7 @@
+name = "agrivision-api"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# To lock down CORS to a specific origin (replace * with your hosting URL):
+# [vars]
+# ALLOWED_ORIGIN = "https://agrivision.example.com"
