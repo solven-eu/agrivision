@@ -740,6 +740,35 @@ a {
   font-style: italic;
   padding: 4px 10px;
 }
+.vigicrues-chip {
+  display: inline-block;
+  font-size: 10px;
+  padding: 2px 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.vigicrues-chip:hover {
+  background: var(--panel2);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.event-card {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel2);
+  font-size: 11px;
+}
+.event-card a {
+  text-decoration: none;
+}
+.event-card a:hover {
+  text-decoration: underline;
+}
 .parcel-emoji-wrap {
   display: flex;
   align-items: center;

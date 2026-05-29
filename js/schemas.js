@@ -4,8 +4,13 @@
 // Per-photo tagging — Claude returns one entry per uploaded photo.
 export const PHOTO_TAG_SCHEMA = {
   photo_index: "number (1-based) matching the photo's order in the prompt",
+  // Coarse content classifier — drives which conversational scenario applies. Tag this
+  // FIRST: if it's not a crop photo, most other fields below are null and the chat module
+  // picks a different action set (document synthesis, label decoding, etc.).
+  content_type:
+    "string — one of: 'crop_field' (vue large d'un champ cultivé), 'single_plant' (plant individuel ou détail de plant), 'plant_detail' (zoom sur feuille/fruit/symptôme), 'administrative_document' (facture, courrier, déclaration, MSA, PAC, etc.), 'phyto_label' (étiquette/emballage produit phyto), 'map_or_plan' (carte, plan de parcelle, croquis), 'equipment' (matériel agricole : tracteur, pulvé, irrigation, etc.), 'unknown_or_unrelated' (rien d'identifiable ou clairement hors agriculture)",
   shot_type:
-    "string — 'overview' (vue large du champ), 'single_plant' (plant individuel), 'detail' (zoom sur feuille/fruit), 'unknown'",
+    "string — 'overview' (vue large du champ), 'single_plant' (plant individuel), 'detail' (zoom sur feuille/fruit), 'unknown'. Met 'unknown' si content_type n'est pas 'crop_field'/'single_plant'/'plant_detail'.",
   crop_code: "string|null — RPG code_cultu si identifiable (BAN, CSU, VRC, etc.) sinon null",
   plant_count_visible: "number|null — nombre total de plants estimé dans la photo",
   fruiting_plant_count_visible:

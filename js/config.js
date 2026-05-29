@@ -9,6 +9,14 @@ export const WORKER_URL = "http://localhost:8787";
 export const ANTHROPIC_API_KEY = ""; // only used when WORKER_URL is empty
 export const ANTHROPIC_MODEL = "claude-haiku-4-5";
 
+// === Mistral (second AI provider, optional) ===
+// When set, the Worker exposes /api/mistral and we can call Mistral side-by-side with
+// Anthropic for cross-validation. Vision models in the Pixtral family:
+//   - pixtral-12b-2409       — small, very cheap, fine for photo tagging
+//   - pixtral-large-latest   — high capability, comparable to Sonnet, ~3× the price
+// Secret: `wrangler secret put MISTRAL_API_KEY` on the Worker.
+export const MISTRAL_MODEL = "pixtral-12b-2409";
+
 // === Dropbox ===
 // Register an app at https://www.dropbox.com/developers/apps:
 //   - Scoped access → App folder
@@ -19,6 +27,29 @@ export const DROPBOX_APP_KEY = "rimf9kjv2vhki4j";
 // Optional: set to a hosted https URL once you deploy. If empty, the app uses
 // the manual code-paste flow (works from file:// and any hosting).
 export const DROPBOX_REDIRECT_URI = "";
+
+// === Stripe (billing) ===
+// Test mode publishable key — only initiates Checkout sessions, cannot charge or refund.
+// Safe to commit. Live key (`pk_live_...`) replaces this only once we go to production.
+// Secret key (`sk_test_...` / `sk_live_...`) is set on the Worker via
+//   `wrangler secret put STRIPE_TEST_SECRET_KEY`
+// and never appears in client code.
+export const STRIPE_PUBLISHABLE_KEY =
+  "pk_test_51TcLMIJAQgzNO5f0YAzplVxzGGfSdIkysFc9MRzdYR6xQVMEyrb2GYG8TofJ9WeNvMNp2BPn7CNrJ0ijWP7cvD9e00iRlNe7zg";
+// Stripe Product Prices — two tiers (Standard, Premium) × two cadences (monthly, yearly).
+// Set either:
+//   - the raw price IDs (price_1...) — fastest path, but you must update them when test/live swap
+//   - the lookup_keys (e.g. "standard_monthly") — the Worker resolves to the live price ID at
+//     Checkout time. Strongly preferred for prod. Set the lookup_key on the Price in the
+//     Stripe Dashboard (Catalog → Products → Price → ... → "Edit price details").
+// Leave the IDs blank and use lookup_keys: pass the lookup_key from client → Worker, Worker
+// resolves via Stripe API. Less to keep in sync.
+export const STRIPE_PRICES = {
+  standard_monthly: { price_id: "", lookup_key: "standard_monthly" },
+  standard_yearly: { price_id: "", lookup_key: "standard_yearly" },
+  premium_monthly: { price_id: "", lookup_key: "premium_monthly" },
+  premium_yearly: { price_id: "", lookup_key: "premium_yearly" },
+};
 
 // === IGN Geoplateforme + BAN ===
 export const IGN_WMS = "https://data.geopf.fr/wms-r/wms";

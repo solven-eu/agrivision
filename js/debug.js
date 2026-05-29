@@ -78,4 +78,49 @@ export function initDebug(app) {
       show(json);
       navigator.clipboard?.writeText(json);
     };
+
+  // Compare Claude vs Mistral on the first available photo. Useful PoC tool to see
+  // the orthogonal failure modes between providers before wiring Mistral into a real path.
+  const compareBtn = document.getElementById("dbg-compare-ai");
+  if (compareBtn)
+    compareBtn.onclick = async () => {
+      const photo = app.getPhotos?.()[0] || app.photos?.[0];
+      if (!photo) {
+        show("Pas de photo dans la banque. Uploade-en une et réessaie.");
+        return;
+      }
+      show("Appel Claude + Mistral en parallèle…");
+      const { ask } = await import("./ai-providers.js");
+      const payload = {
+        max_tokens: 600,
+        system: "Tu es un expert agronome. Identifie en français la culture sur la photo en 1-2 phrases.",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: photo.mime, data: photo.b64 } },
+              { type: "text", text: "Qu'est-ce que tu vois ?" },
+            ],
+          },
+        ],
+      };
+      const [a, m] = await Promise.all([ask("anthropic", payload), ask("mistral", payload)]);
+      const lines = [];
+      lines.push("=== Claude ===");
+      lines.push(
+        a.ok
+          ? a.body?.content?.[0]?.text || JSON.stringify(a.body)
+          : "ERR " + a.status + " " + (a.body?.error || "")
+      );
+      lines.push("usage: " + JSON.stringify(a.body?.usage || {}));
+      lines.push("");
+      lines.push("=== Mistral ===");
+      lines.push(
+        m.ok
+          ? m.body?.content?.[0]?.text || JSON.stringify(m.body)
+          : "ERR " + m.status + " " + (m.body?.error || "")
+      );
+      lines.push("usage: " + JSON.stringify(m.body?.usage || {}));
+      show(lines.join("\n"));
+    };
 }

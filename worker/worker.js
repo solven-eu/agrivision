@@ -3,21 +3,404 @@
 // Dashboard: https://dash.cloudflare.com/ef022c9a994ccb0772ab8b3b43f25ffe/workers/services/view/agrivision-api/production
 //
 // Routes:
-//   OPTIONS *               → CORS preflight
-//   POST    /api/analyze    → forward to https://api.anthropic.com/v1/messages
+//   OPTIONS *                       → CORS preflight
+//   POST    /api/analyze            → forward to Anthropic (optional Bearer for quota tracking)
+//   POST    /api/mistral            → forward to Mistral AI (same payload shape, normalized)
+//   GET     /api/features           → PLAN_FEATURES catalog (public, informational)
+//   GET     /api/soil               → nearest N soil samples + medians (public)
+//   POST    /api/feedback           → store user feedback in KV (optional Bearer for sub)
+//   POST    /api/auth/dropbox/login → verify Dropbox id_token, mint AgriVision session JWT
+//   POST    /api/auth/refresh        → rotate the session JWT (revokes the presented one)
+//   POST    /api/auth/logout         → revoke the presented session JWT server-side
+//   GET     /api/share/quota        → current user's quota (Bearer required)
+//   GET     /api/share/status       → last sync info (Bearer required)
+//   POST    /api/share/save         → mirror manifest + photos into KV (Bearer required)
+//   DELETE  /api/share/account      → purge user's data from KV (Bearer required)
+//   POST    /api/billing/checkout    → create Stripe Checkout Session (Bearer required)
+//   POST    /api/billing/portal      → create Stripe Customer Portal session (Bearer required)
+//   POST    /api/billing/webhook     → Stripe events → update user plan in KV
+//   GET     /api/events-feed        → fetch + normalize an allowlisted RSS/HTML feed
+//   GET     /api/vigicrues-stations → scrape Vigicrues Réunion station catalog
 //
 // Secrets:
 //   ANTHROPIC_API_KEY       (set via: wrangler secret put ANTHROPIC_API_KEY)
+//   MISTRAL_API_KEY         (set via: wrangler secret put MISTRAL_API_KEY) — optional;
+//                            /api/mistral returns 503 when absent.
+//   AGRI_JWT_SECRET         (set via: wrangler secret put AGRI_JWT_SECRET) — HMAC key
+//                            for our session JWT. Generate: openssl rand -hex 32.
+//   STRIPE_SECRET_KEY       (set via: wrangler secret put STRIPE_SECRET_KEY)
+//   STRIPE_WEBHOOK_SECRET   (set via: wrangler secret put STRIPE_WEBHOOK_SECRET)
 //
 // Optional environment:
 //   ALLOWED_ORIGIN          (defaults to "*"; set to your hosting origin to lock it down)
 
-const ALLOWED_HEADERS = "content-type,anthropic-version";
+const ALLOWED_HEADERS = "content-type,anthropic-version,authorization";
 const MAX_BODY_BYTES = 25 * 1024 * 1024; // 25 MB cap (several large images + context)
+
+// AgriVision session JWT config. We mint an opaque-to-clients HS256 JWT signed with
+// AGRI_JWT_SECRET (set via `wrangler secret put AGRI_JWT_SECRET`). The SPA presents it
+// as Authorization: Bearer on every identified endpoint. See ROADMAP "First-party auth (BFF)".
+const AGRI_JWT_AUD = "agrivision";
+const AGRI_JWT_ISS = "agrivision";
+const AGRI_JWT_TTL_SECONDS = 7 * 24 * 3600; // 7 days
+
+// Dropbox OpenID Connect endpoints (discovery + fallback JWKS URL).
+const DROPBOX_OIDC = {
+  discovery: "https://www.dropbox.com/.well-known/openid-configuration",
+  // Issuers we accept on the id_token. Dropbox has used both at different times.
+  acceptedIssuers: ["https://www.dropbox.com", "https://api.dropboxapi.com"],
+};
+
+// Per-tier quotas & feature flags are imported from the SHARED config that the SPA also
+// reads. Single source of truth — the Worker is the trust boundary that enforces, the SPA
+// uses the same values purely to render UI affordances. See `js/plan-features.js`.
+import { PLAN_FEATURES, quotasForPlan as quotasForTier, hasFeature } from "../js/plan-features.js";
+
+// Soil dataset — preprocessed from the Nature Sci Data 2026 soil_run.csv.
+// 22.7k samples across Réunion, columns indexed by `SOIL_DATA.fields`. See
+// `scripts/build-soil-data.js` for the preprocessing pipeline.
+// Wrangler/esbuild handles JSON imports natively — no `with { type: "json" }` attribute
+// needed (which would break older wrangler < 3.78). Bundled JSON adds ~1.9 MB raw /
+// ~600 KB compressed to the Worker script, within the Free-tier 1 MB compressed cap.
+import SOIL_DATA from "./data/soil-reunion.json";
+
+// Map a Price `lookup_key` to a (tier, cadence) pair. The lookup_key is the canonical
+// link between Stripe Prices and our internal tier model — rename freely in Stripe as long
+// as the prefix matches.
+function tierFromLookupKey(lookupKey) {
+  if (!lookupKey) return null;
+  if (lookupKey.startsWith("standard_")) return "standard";
+  if (lookupKey.startsWith("premium_")) return "premium";
+  return null;
+}
+
+// Events feed allowlist. Adding a source = one line here. URLs that turn out to be wrong
+// will return empty arrays (the client tolerates that). Each parser must return objects
+// shaped like { id, title, link, date (ISO), severity? }.
+const EVENTS_FEEDS = {
+  "vigicrues-reunion": {
+    // HTML bulletin from the Réunion flood-watch service. No RSS, so we scrape.
+    // 3h cache TTL — bulletins update a few times per day at most.
+    url: "https://www.vigicrues-reunion.re/bulletin.php",
+    cacheTtl: 3 * 3600,
+    parser: parseVigicruesReunion,
+  },
+  "meteofrance-vigilance-reunion": {
+    // Météo-France Vigilance accessible page — same data as the main map, in plain HTML
+    // designed for screen readers (much easier to parse than the JS-heavy main view).
+    // Covers cyclone, vent fort, fortes pluies/orages, mer dangereuse, houle, etc.
+    // 30 min cache TTL — vigilance bulletins update several times per day, more during
+    // active events.
+    url: "https://vigilance.meteofrance.fr/fr/la-reunion/vigilance-accessible",
+    cacheTtl: 1800,
+    parser: parseMeteoFranceVigilance,
+  },
+  "promed-plant": {
+    // Global feed — filter for plant-related items in the parser. ProMED doesn't expose
+    // a stable category-only feed; the post URL pattern is the closest we have.
+    url: "https://promedmail.org/feed/",
+    parser: (xml) =>
+      parseRss(xml).filter((it) =>
+        /plant|crop|fungi|virus|blight|wilt|rust|mildew|mosaic|leaf|fruit/i.test(
+          it.title + " " + (it.summary || "")
+        )
+      ),
+  },
+  "cmrs-reunion": {
+    // Météo-France Réunion cyclone bulletin RSS. If the URL drifts the proxy returns [].
+    url: "https://meteofrance.re/rss/cyclone",
+  },
+  "eppo-reporting": {
+    // EPPO Reporting Service RSS. URL pending confirmation — left disabled in the client
+    // catalog until validated, but the route works if pointed at the right URL.
+    url: "https://gd.eppo.int/reporting/rss",
+  },
+  "rnm-prices": {
+    // RNM FranceAgriMer doesn't publish a plain RSS for daily cours. Leave disabled.
+    url: "https://www.rnm.franceagrimer.fr/rss",
+  },
+};
+
+// Minimal RSS 2.0 / Atom parser — string-only, no DOM. Good enough for these feeds.
+function parseRss(xml) {
+  const items = [];
+  // RSS <item> blocks
+  const itemRe = /<item\b[\s\S]*?<\/item>/gi;
+  let m;
+  while ((m = itemRe.exec(xml)) !== null) {
+    const block = m[0];
+    items.push({
+      id: tag(block, "guid") || tag(block, "link") || tag(block, "title"),
+      title: stripTags(tag(block, "title") || ""),
+      link: tag(block, "link") || null,
+      date: normalizeDate(tag(block, "pubDate") || tag(block, "dc:date")),
+      summary: stripTags(tag(block, "description") || ""),
+    });
+  }
+  if (items.length) return items;
+  // Atom <entry> blocks
+  const entryRe = /<entry\b[\s\S]*?<\/entry>/gi;
+  while ((m = entryRe.exec(xml)) !== null) {
+    const block = m[0];
+    const linkMatch = block.match(/<link[^>]*href="([^"]+)"/i);
+    items.push({
+      id: tag(block, "id") || (linkMatch && linkMatch[1]) || tag(block, "title"),
+      title: stripTags(tag(block, "title") || ""),
+      link: linkMatch ? linkMatch[1] : null,
+      date: normalizeDate(tag(block, "updated") || tag(block, "published")),
+      summary: stripTags(tag(block, "summary") || tag(block, "content") || ""),
+    });
+  }
+  return items;
+}
+function tag(block, name) {
+  const re = new RegExp(`<${name}[^>]*>([\\s\\S]*?)<\\/${name}>`, "i");
+  const m = block.match(re);
+  if (!m) return null;
+  return m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").trim();
+}
+function stripTags(s) {
+  return String(s || "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+function normalizeDate(s) {
+  if (!s) return null;
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+// Vigicrues Réunion stations catalog scraper. Parses the donnees.php navigation menu
+// (NORD / EST / SUD / OUEST + rivers + station links) and returns a hierarchical catalog.
+// Best-effort regex extraction: the page is server-rendered HTML with stable URL patterns
+// (`donnees.php?id=<code>`); if the menu HTML drifts, we still return the flat list of
+// stations under an "Inconnu" region rather than crashing.
+function parseVigicruesStations(html) {
+  // Step 1: pull every (id, label) station link.
+  const linkRe = /<a[^>]+href="(?:[^"]*?)donnees\.php\?id=([A-Za-z0-9_-]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const allStations = [];
+  let m;
+  while ((m = linkRe.exec(html)) !== null) {
+    const id = m[1];
+    const name = stripTags(m[2]).trim();
+    if (!name) continue;
+    // Capture the surrounding 1500 chars so we can later infer region + river context.
+    const start = Math.max(0, m.index - 1500);
+    const ctx = stripTags(html.slice(start, m.index + m[0].length));
+    allStations.push({ id, name, ctx });
+  }
+  if (allStations.length === 0) return [];
+
+  // Step 2: per station, find the closest preceding region word and river label.
+  const regionWords = ["NORD", "EST", "SUD", "OUEST"];
+  const riverRe =
+    /(rivi[èe]re\s+(?:des\s+|d[eu']\s+)?[A-ZÀ-ÿ][\wÀ-ÿ'\-\s]{1,40}|ravine\s+(?:des\s+|de\s+|du\s+|d[eu']\s+)?[A-ZÀ-ÿ][\wÀ-ÿ'\-\s]{1,40}|bras\s+(?:de\s+|du\s+|des\s+|d[eu']\s+)?[A-ZÀ-ÿ][\wÀ-ÿ'\-\s]{1,40})/gi;
+  const byRegion = {};
+  for (const s of allStations) {
+    let region = "Inconnu";
+    let lastIdx = -1;
+    for (const w of regionWords) {
+      const re = new RegExp(`\\b${w}\\b`, "g");
+      let r;
+      while ((r = re.exec(s.ctx)) !== null) {
+        if (r.index > lastIdx) {
+          lastIdx = r.index;
+          region = w;
+        }
+      }
+    }
+    // River = last matched basin name before the station link in the context window.
+    let river = "(autre)";
+    let rm;
+    riverRe.lastIndex = 0;
+    while ((rm = riverRe.exec(s.ctx)) !== null) {
+      river = rm[1].replace(/\s+/g, " ").trim();
+    }
+    (byRegion[region] ||= {})[river] = byRegion[region][river] || [];
+    if (!byRegion[region][river].some((x) => x.id === s.id)) {
+      byRegion[region][river].push({ id: s.id, name: s.name });
+    }
+  }
+
+  return Object.entries(byRegion).map(([name, rivers]) => ({
+    name,
+    rivers: Object.entries(rivers).map(([rname, stations]) => ({ name: rname, stations })),
+  }));
+}
+
+// Météo-France Vigilance — accessible page parser. The page lists phenomena
+// (cyclone, vent fort, fortes pluies/orages, mer dangereuse, houle dangereuse, etc.)
+// each annotated with a vigilance color (vert / jaune / orange / rouge). The accessible
+// version is plain HTML with predictable patterns like "<Phénomène> : vigilance <color>"
+// or "Phénomène : niveau <color>". We emit one event per non-green phenomenon plus an
+// umbrella status item.
+function parseMeteoFranceVigilance(html, feed) {
+  const text = stripTags(html);
+  const lower = text.toLowerCase();
+  const items = [];
+  // Validity window — typical wording: "valable de XX:XX à YY:YY" or "valide jusqu'au DD/MM/YYYY".
+  let validityDate = null;
+  const dateMatch =
+    text.match(/(\d{1,2}\/\d{1,2}\/\d{4}(?:\s+\d{1,2}[hH:]\d{2})?)/) ||
+    text.match(/(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?)/);
+  if (dateMatch) {
+    const parts = dateMatch[1].split("/");
+    if (parts.length === 3) {
+      const dmy = `${parts[2].slice(0, 4)}-${parts[1].padStart(2, "0")}-${parts[0].padStart(2, "0")}`;
+      const rest = dateMatch[1].split(/\s+/)[1];
+      const iso = rest ? `${dmy}T${rest.replace(/[hH]/, ":")}:00` : `${dmy}T00:00:00`;
+      const d = new Date(iso);
+      if (!isNaN(d.getTime())) validityDate = d.toISOString();
+    } else {
+      const d = new Date(dateMatch[1]);
+      if (!isNaN(d.getTime())) validityDate = d.toISOString();
+    }
+  }
+
+  // Overall severity scan.
+  let topSev = null;
+  if (/\brouge\b/i.test(lower)) topSev = "high";
+  else if (/\borange\b/i.test(lower)) topSev = "high";
+  else if (/\bjaune\b/i.test(lower)) topSev = "med";
+
+  // Per-phenomenon extraction: look for known FR phenomenon keywords followed within a
+  // small window by a color word. Heuristic, resilient to small layout drifts.
+  const phenomena = [
+    { pat: /cyclon[ea-z]*\s+tropic[a-z]+/i, label: "Cyclone tropical" },
+    { pat: /fortes?\s+pluies?(?:\s+et\s+orages?)?/i, label: "Fortes pluies / orages" },
+    { pat: /vents?\s+forts?/i, label: "Vent fort" },
+    { pat: /mer\s+dangereuse(?:\s+à\s+la\s+côte)?/i, label: "Mer dangereuse à la côte" },
+    { pat: /houle\s+dangereuse/i, label: "Houle dangereuse" },
+    { pat: /orages?/i, label: "Orages" },
+    { pat: /canicule/i, label: "Canicule" },
+    { pat: /grand\s+froid/i, label: "Grand froid" },
+    { pat: /inondations?/i, label: "Inondations" },
+    { pat: /avalanche/i, label: "Avalanches" },
+  ];
+  const colorRe = /\b(vert|jaune|orange|rouge)\b/gi;
+  const sevFor = (c) => (c === "rouge" || c === "orange" ? "high" : c === "jaune" ? "med" : "low");
+  const seen = new Set();
+  for (const ph of phenomena) {
+    const m = text.match(ph.pat);
+    if (!m) continue;
+    // Search for a color word within ~200 chars after the phenomenon match.
+    const window = text.slice(m.index, m.index + 200);
+    colorRe.lastIndex = 0;
+    const cm = colorRe.exec(window);
+    if (!cm) continue;
+    const color = cm[1].toLowerCase();
+    if (color === "vert") continue;
+    const key = ph.label + "|" + color;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push({
+      id: `mf-vigilance-${ph.label.replace(/\s+/g, "_")}-${color}`,
+      title: `${ph.label} — vigilance ${color}`,
+      link: feed.url,
+      date: validityDate,
+      severity: sevFor(color),
+      summary: `Vigilance Météo-France Réunion : ${ph.label} en ${color}`,
+    });
+  }
+
+  // Umbrella status item — always shown so the user can reach the bulletin even on calm days.
+  items.unshift({
+    id: `mf-vigilance-bulletin-${validityDate || "current"}`,
+    title:
+      topSev === "high"
+        ? "Vigilance Météo-France — niveau élevé sur au moins un phénomène"
+        : topSev === "med"
+          ? "Vigilance Météo-France — phénomènes en jaune"
+          : "Vigilance Météo-France Réunion (calme)",
+    link: feed.url,
+    date: validityDate,
+    severity: topSev || "low",
+    summary: "Bulletin officiel de vigilance météorologique pour La Réunion",
+  });
+  return items;
+}
+
+// Vigicrues Réunion bulletin scraper. The page lists each watched river with a vigilance
+// color (vert / jaune / orange / rouge). We emit one item per non-green watershed plus an
+// overall bulletin link. Resilient to layout drift: we look for the color words anchored
+// near a section heading, and fall back to a single "bulletin disponible" item if nothing
+// structured can be parsed.
+function parseVigicruesReunion(html, feed) {
+  const text = stripTags(html);
+  const lower = text.toLowerCase();
+  const items = [];
+  // Look for a publication date — common French formats.
+  let bulletinDate = null;
+  const dateMatch =
+    text.match(/(\d{1,2}\/\d{1,2}\/\d{4}(?:\s+\d{1,2}[:hH]\d{2})?)/) ||
+    text.match(/(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?)/);
+  if (dateMatch) {
+    const parts = dateMatch[1].split("/");
+    if (parts.length === 3) {
+      // DD/MM/YYYY (HH:MM optional)
+      const dmy = `${parts[2].slice(0, 4)}-${parts[1].padStart(2, "0")}-${parts[0].padStart(2, "0")}`;
+      const rest = dateMatch[1].split(/\s+/)[1];
+      const iso = rest ? `${dmy}T${rest.replace(/[hH]/, ":")}:00` : `${dmy}T00:00:00`;
+      const d = new Date(iso);
+      if (!isNaN(d.getTime())) bulletinDate = d.toISOString();
+    } else {
+      const d = new Date(dateMatch[1]);
+      if (!isNaN(d.getTime())) bulletinDate = d.toISOString();
+    }
+  }
+
+  // Severity scan: any rouge / orange / jaune mention bumps the overall level.
+  let topSev = null;
+  if (/\brouge\b/i.test(lower)) topSev = "high";
+  else if (/\borange\b/i.test(lower)) topSev = "high";
+  else if (/\bjaune\b/i.test(lower)) topSev = "med";
+
+  // Try to extract per-river entries: a heading-like token (basin name) followed within
+  // ~80 chars by a color word. Common Réunion watersheds — heuristic, not exhaustive.
+  const basinRe =
+    /(rivi[èe]re\s+(?:des\s+)?\w[\w'\s\-]*?|ravine\s+\w[\w'\s\-]*?|bras\s+\w[\w'\s\-]*?)[\s\S]{0,120}?\b(vert|jaune|orange|rouge)\b/gi;
+  const seen = new Set();
+  let m;
+  while ((m = basinRe.exec(text)) !== null) {
+    const name = m[1].replace(/\s+/g, " ").trim();
+    const color = m[2].toLowerCase();
+    const key = name.toLowerCase() + "|" + color;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (color === "vert") continue; // only emit non-trivial alerts
+    const sev = color === "rouge" ? "high" : color === "orange" ? "high" : "med";
+    items.push({
+      id: `vigicrues-${name}-${color}`,
+      title: `${name} — vigilance ${color}`,
+      link: feed.url,
+      date: bulletinDate,
+      severity: sev,
+      summary: `Vigicrues Réunion : niveau ${color}`,
+    });
+  }
+
+  // Always include a top-level "bulletin du jour" item so the user can jump to the page
+  // even when nothing is flagged. Severity reflects the most concerning watershed.
+  items.unshift({
+    id: `vigicrues-bulletin-${bulletinDate || "current"}`,
+    title:
+      topSev === "high"
+        ? "Vigilance crues — niveau élevé sur au moins un bassin"
+        : topSev === "med"
+          ? "Vigilance crues — bassins en jaune"
+          : "Bulletin Vigicrues Réunion (calme)",
+    link: feed.url,
+    date: bulletinDate,
+    severity: topSev || "low",
+    summary: "Bulletin officiel de surveillance des crues à La Réunion",
+  });
+  return items;
+}
 
 const corsHeaders = (origin) => ({
   "access-control-allow-origin": origin || "*",
-  "access-control-allow-methods": "POST, OPTIONS",
+  "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
   "access-control-allow-headers": ALLOWED_HEADERS,
   "access-control-expose-headers":
     "request-id,retry-after,anthropic-ratelimit-requests-limit,anthropic-ratelimit-requests-remaining,anthropic-ratelimit-requests-reset,anthropic-ratelimit-input-tokens-limit,anthropic-ratelimit-input-tokens-remaining,anthropic-ratelimit-input-tokens-reset,anthropic-ratelimit-output-tokens-limit,anthropic-ratelimit-output-tokens-remaining,anthropic-ratelimit-output-tokens-reset,anthropic-ratelimit-tokens-limit,anthropic-ratelimit-tokens-remaining,anthropic-ratelimit-tokens-reset",
@@ -32,6 +415,159 @@ export default {
 
     if (req.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
+    }
+
+    // POST /api/auth/refresh — slide the session forward. Returns a new JWT with the
+    // same `sub` + extras; the OLD jti is added to the revocation set so the previous
+    // token can't be reused (defense against accidental token leakage across rotations).
+    if (url.pathname === "/api/auth/refresh" && req.method === "POST") {
+      if (!env.AGRI_JWT_SECRET) return json({ error: "AGRI_JWT_SECRET not configured" }, 503, origin);
+      const bearer = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+      const claims = await verifyAgriSession(env, bearer);
+      if (!claims) return json({ error: "invalid or expired session" }, 401, origin);
+      // Revoke the current jti (best-effort — non-fatal if SHARE_KV isn't bound).
+      if (claims.jti && env.SHARE_KV) {
+        const ttl = Math.max(60, (claims.exp || 0) - Math.floor(Date.now() / 1000));
+        await env.SHARE_KV.put(`revoked/${claims.jti}`, "1", { expirationTtl: ttl }).catch(() => {});
+      }
+      const session = await mintAgriSession(env, claims.sub, {
+        provider: claims.provider || null,
+        email: claims.email || null,
+      });
+      return json({ agri_session: session.token, exp: session.exp, sub: claims.sub }, 200, origin);
+    }
+
+    // POST /api/auth/logout — invalidate the presented session JWT server-side. The
+    // jti is added to `revoked/<jti>` in KV with TTL = remaining session lifetime so
+    // the entry self-deletes when the JWT would have expired anyway.
+    if (url.pathname === "/api/auth/logout" && req.method === "POST") {
+      const bearer = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+      const claims = await verifyAgriSession(env, bearer);
+      // Logout is idempotent — if the token is already invalid we still return ok.
+      if (!claims || !claims.jti || !env.SHARE_KV) return json({ ok: true }, 200, origin);
+      const ttl = Math.max(60, (claims.exp || 0) - Math.floor(Date.now() / 1000));
+      await env.SHARE_KV.put(`revoked/${claims.jti}`, "1", { expirationTtl: ttl });
+      return json({ ok: true, revoked: claims.jti }, 200, origin);
+    }
+
+    // POST /api/feedback — accept a user-submitted feedback message and store it in KV.
+    // No auth required (anonymous feedback is valid). When a session bearer is present,
+    // we attach the sub for correlation. Light rate-limiting by IP via CF cf.colo is left
+    // for v2; PoC tolerates a few abuse messages.
+    if (url.pathname === "/api/feedback" && req.method === "POST") {
+      return feedbackSubmit(req, env, origin);
+    }
+
+    // GET /api/soil?lat=&lon=&n=5 — returns the N nearest soil samples + aggregated medians.
+    // Public, no auth. Brute-force nearest-neighbour over 22.7k samples (~5ms on a Worker).
+    if (url.pathname === "/api/soil" && req.method === "GET") {
+      return soilNearby(req, env, origin);
+    }
+
+    // GET /api/features — public, no auth. Returns the PLAN_FEATURES catalog so external
+    // tools (or a debug build) can read the live config without bundling the same constants.
+    // The Worker is the authoritative trust boundary; this endpoint is informational.
+    if (url.pathname === "/api/features" && req.method === "GET") {
+      return json({ plans: PLAN_FEATURES }, 200, origin);
+    }
+
+    // ----- Mistral AI (second provider) -----
+    // POST /api/mistral — accepts the same payload shape as /api/analyze (Anthropic-style
+    // system + messages with image+text content blocks). Worker translates to Mistral's
+    // OpenAI-compatible format, calls api.mistral.ai, and normalizes the response back to
+    // Anthropic shape so the client is provider-agnostic.
+    if (url.pathname === "/api/mistral" && req.method === "POST") return mistralAnalyze(req, env, origin);
+
+    // ----- Billing (Stripe) -----
+    if (url.pathname === "/api/billing/checkout" && req.method === "POST")
+      return billingCheckout(req, env, origin);
+    if (url.pathname === "/api/billing/portal" && req.method === "POST")
+      return billingPortal(req, env, origin);
+    if (url.pathname === "/api/billing/webhook" && req.method === "POST")
+      return billingWebhook(req, env, origin);
+
+    // POST /api/auth/dropbox/login — trade a verified Dropbox id_token for an AgriVision
+    // session JWT. The SPA calls this once after the Dropbox OAuth code exchange, then
+    // uses `Authorization: Bearer <agri_jwt>` on every other identified endpoint.
+    if (url.pathname === "/api/auth/dropbox/login" && req.method === "POST") {
+      if (!env.AGRI_JWT_SECRET) return json({ error: "AGRI_JWT_SECRET not configured" }, 503, origin);
+      let body;
+      try {
+        body = await req.json();
+      } catch (e) {
+        return json({ error: "bad body: " + e.message }, 400, origin);
+      }
+      if (!body?.id_token) return json({ error: "id_token required" }, 400, origin);
+      try {
+        // Audience check: the SPA passes its Dropbox client_id (DROPBOX_APP_KEY) so the
+        // Worker can confirm the id_token was minted for *this* SPA. Skip if not sent
+        // (avoids forcing every caller to know the value during the PoC).
+        const claims = await verifyDropboxIdToken(body.id_token, body.client_id || null);
+        const sub = `dropbox:${claims.sub}`;
+        const session = await mintAgriSession(env, sub, {
+          provider: "dropbox",
+          email: claims.email || null,
+        });
+        return json({ agri_session: session.token, exp: session.exp, sub }, 200, origin);
+      } catch (e) {
+        return json({ error: "id_token verification failed: " + e.message }, 401, origin);
+      }
+    }
+
+    // POST /api/share/save — opt-in mirror of a Dropbox manifest (+ optional photos) into KV.
+    // Auth: Authorization: Bearer <dropbox_token>. The Worker validates the token with
+    // Dropbox to derive a stable account_id, which is the only identity we use.
+    if (url.pathname === "/api/share/save" && req.method === "POST") {
+      return shareSave(req, env, origin);
+    }
+    // DELETE /api/share/account — opt-out + purge of everything under the user's prefix.
+    if (url.pathname === "/api/share/account" && req.method === "DELETE") {
+      return shareDelete(req, env, origin);
+    }
+    // GET /api/share/status — returns last sync info for the current account (if any).
+    if (url.pathname === "/api/share/status" && req.method === "GET") {
+      return shareStatus(req, env, origin);
+    }
+    // GET /api/share/quota — current consumption + caps for the user's UI.
+    if (url.pathname === "/api/share/quota" && req.method === "GET") {
+      return shareQuota(req, env, origin);
+    }
+
+    // GET /api/vigicrues-stations — scrapes the donnees.php menu structure,
+    // returns { regions: [{name, rivers: [{name, stations: [{id, name}]}]}] }.
+    if (url.pathname === "/api/vigicrues-stations" && req.method === "GET") {
+      try {
+        const upstream = await fetch("https://www.vigicrues-reunion.re/donnees.php", {
+          headers: { "user-agent": "AgriVision/0.1" },
+          cf: { cacheTtl: 86400, cacheEverything: true }, // 24h
+        });
+        if (!upstream.ok) return json({ regions: [], error: "upstream " + upstream.status }, 200, origin);
+        const html = await upstream.text();
+        return json({ regions: parseVigicruesStations(html) }, 200, origin);
+      } catch (e) {
+        return json({ regions: [], error: e.message }, 200, origin);
+      }
+    }
+
+    // GET /api/events-feed?source=<id> — fetches an allowlisted feed and normalizes.
+    if (url.pathname === "/api/events-feed" && req.method === "GET") {
+      const sourceId = url.searchParams.get("source");
+      const feed = EVENTS_FEEDS[sourceId];
+      if (!feed) return json({ error: "unknown source" }, 400, origin);
+      try {
+        const upstream = await fetch(feed.url, {
+          // Be polite — UA helps some publishers not 403.
+          headers: { "user-agent": "AgriVision/0.1 (+https://github.com/blacelle/agrivision)" },
+          // CF edge cache — default 30 min, overridden per source (e.g. 3h for Vigicrues).
+          cf: { cacheTtl: feed.cacheTtl || 1800, cacheEverything: true },
+        });
+        if (!upstream.ok) return json({ items: [], error: "upstream " + upstream.status }, 200, origin);
+        const text = await upstream.text();
+        const items = (feed.parser || parseRss)(text, feed);
+        return json({ source: sourceId, items }, 200, origin);
+      } catch (e) {
+        return json({ items: [], error: e.message }, 200, origin);
+      }
     }
 
     if (url.pathname !== "/api/analyze" || req.method !== "POST") {
@@ -69,6 +605,66 @@ export default {
     } else {
       upstreamHeaders["x-api-key"] = key;
     }
+    // AI access gating + per-user token quota. Behavior depends on whether SHARE_KV is bound:
+    //   - Not bound (local dev / no-KV demo): anonymous pass-through, no gating, no tracking.
+    //   - Bound (production): require a paid tier. Anonymous → 402. Free tier → 402.
+    //     Paid tiers → token-quota check, 429 if over.
+    let identifiedAccount = null;
+    if (env.SHARE_KV) {
+      const auth = req.headers.get("authorization");
+      if (!auth) {
+        return json(
+          {
+            error: "ai_requires_signin",
+            message: "Connecte-toi et choisis un plan Standard ou Premium pour utiliser l'IA.",
+          },
+          402,
+          origin
+        );
+      }
+      const who = await resolveAccount(req, env);
+      if (who.error) return json({ error: who.error }, who.status, origin);
+      const plan = await loadPlan(env, who.accountId);
+      const limits = quotasForTier(plan.tier);
+      if (limits.max_tokens_in_per_period === 0) {
+        return json(
+          {
+            error: "ai_requires_paid_plan",
+            message:
+              "L'IA est réservée aux plans Standard et Premium. Passe à un plan payant pour l'utiliser.",
+            tier: plan.tier,
+          },
+          402,
+          origin
+        );
+      }
+      const q = await loadQuota(env, who.accountId);
+      {
+        if (q.tokens_in >= limits.max_tokens_in_per_period)
+          return json(
+            {
+              error: "tokens_in_quota_exceeded",
+              current: q.tokens_in,
+              max: limits.max_tokens_in_per_period,
+              tier: plan.tier,
+            },
+            429,
+            origin
+          );
+        if (q.tokens_out >= limits.max_tokens_out_per_period)
+          return json(
+            {
+              error: "tokens_out_quota_exceeded",
+              current: q.tokens_out,
+              max: limits.max_tokens_out_per_period,
+              tier: plan.tier,
+            },
+            429,
+            origin
+          );
+        identifiedAccount = who.accountId;
+      }
+    }
     const upstream = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: upstreamHeaders,
@@ -99,12 +695,864 @@ export default {
       const v = upstream.headers.get(h);
       if (v) passThrough[h] = v;
     }
+    // Identified-user path: consume the body once to extract `usage`, bump KV, then echo.
+    // Anonymous path streams unchanged.
+    if (identifiedAccount) {
+      const text = await upstream.text();
+      try {
+        const j = JSON.parse(text);
+        if (j.usage) {
+          const q = await loadQuota(env, identifiedAccount);
+          q.tokens_in += (j.usage.input_tokens || 0) + (j.usage.cache_creation_input_tokens || 0);
+          q.tokens_out += j.usage.output_tokens || 0;
+          q.writes = (q.writes || 0) + 1;
+          await saveQuota(env, identifiedAccount, q);
+        }
+      } catch {}
+      return new Response(text, {
+        status: upstream.status,
+        headers: { ...passThrough, ...corsHeaders(origin) },
+      });
+    }
     return new Response(upstream.body, {
       status: upstream.status,
       headers: { ...passThrough, ...corsHeaders(origin) },
     });
   },
 };
+
+// =========================================================================
+// "Share with AgriVision" — opt-in KV mirror of the user's Dropbox manifests.
+// Identity = Dropbox account_id. Layout under SHARE_KV:
+//   share/<account_id>/cultures/<culture_id>/culture.json
+//   share/<account_id>/cultures/<culture_id>/photos/<photo_id>
+//   share/<account_id>/last_sync.json
+// =========================================================================
+
+// ============= Base64URL helpers (string + bytes) =============
+function b64urlEncodeBytes(bytes) {
+  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let s = "";
+  for (const b of arr) s += String.fromCharCode(b);
+  return btoa(s).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+function b64urlEncodeString(s) {
+  return b64urlEncodeBytes(new TextEncoder().encode(s));
+}
+function b64urlDecodeBytes(s) {
+  s = String(s).replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function b64urlDecodeString(s) {
+  return new TextDecoder().decode(b64urlDecodeBytes(s));
+}
+
+// ============= Dropbox JWKS — fetched once, edge-cached 24h =============
+async function fetchDropboxJwks() {
+  const dr = await fetch(DROPBOX_OIDC.discovery, {
+    cf: { cacheTtl: 86400, cacheEverything: true },
+  });
+  if (!dr.ok) throw new Error("oidc discovery " + dr.status);
+  const conf = await dr.json();
+  if (!conf.jwks_uri) throw new Error("no jwks_uri in discovery");
+  const jr = await fetch(conf.jwks_uri, { cf: { cacheTtl: 86400, cacheEverything: true } });
+  if (!jr.ok) throw new Error("jwks " + jr.status);
+  return { jwks: await jr.json(), issuer: conf.issuer || null };
+}
+
+// ============= Verify a Dropbox id_token (RS256) =============
+// Throws on any failure. Returns the parsed claims on success.
+async function verifyDropboxIdToken(jwt, expectedAudience) {
+  const parts = String(jwt || "").split(".");
+  if (parts.length !== 3) throw new Error("malformed jwt");
+  const [headerB64, payloadB64, sigB64] = parts;
+  const header = JSON.parse(b64urlDecodeString(headerB64));
+  if (header.alg !== "RS256") throw new Error("unexpected alg " + header.alg);
+  if (!header.kid) throw new Error("missing kid");
+  const { jwks, issuer: discoveredIssuer } = await fetchDropboxJwks();
+  const key = (jwks.keys || []).find((k) => k.kid === header.kid);
+  if (!key) throw new Error("kid not in jwks");
+  const cryptoKey = await crypto.subtle.importKey(
+    "jwk",
+    { kty: key.kty, n: key.n, e: key.e, alg: "RS256", ext: true },
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["verify"]
+  );
+  const data = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+  const sig = b64urlDecodeBytes(sigB64);
+  const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", cryptoKey, sig, data);
+  if (!ok) throw new Error("invalid signature");
+  const claims = JSON.parse(b64urlDecodeString(payloadB64));
+  const now = Math.floor(Date.now() / 1000);
+  if (claims.exp && claims.exp < now) throw new Error("expired");
+  if (claims.nbf && claims.nbf > now) throw new Error("not yet valid");
+  const acceptable = new Set(DROPBOX_OIDC.acceptedIssuers);
+  if (discoveredIssuer) acceptable.add(discoveredIssuer);
+  if (!acceptable.has(claims.iss)) throw new Error("unexpected issuer: " + claims.iss);
+  if (expectedAudience && claims.aud !== expectedAudience)
+    throw new Error("unexpected audience: " + claims.aud);
+  if (!claims.sub) throw new Error("no sub claim");
+  return claims;
+}
+
+// ============= AgriVision session JWT (HS256) — mint + verify =============
+async function mintAgriSession(env, sub, extras = {}) {
+  if (!env.AGRI_JWT_SECRET) throw new Error("AGRI_JWT_SECRET not configured");
+  const now = Math.floor(Date.now() / 1000);
+  const payload = {
+    sub, // namespaced: "dropbox:<dbx_sub>", "google:<g_sub>", …
+    iss: AGRI_JWT_ISS,
+    aud: AGRI_JWT_AUD,
+    iat: now,
+    exp: now + AGRI_JWT_TTL_SECONDS,
+    jti: crypto.randomUUID(),
+    ...extras,
+  };
+  const headerB64 = b64urlEncodeString(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const payloadB64 = b64urlEncodeString(JSON.stringify(payload));
+  const data = `${headerB64}.${payloadB64}`;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(env.AGRI_JWT_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+  return { token: `${data}.${b64urlEncodeBytes(sig)}`, exp: payload.exp, jti: payload.jti };
+}
+
+async function verifyAgriSession(env, jwt) {
+  if (!env.AGRI_JWT_SECRET || !jwt) return null;
+  const parts = String(jwt).split(".");
+  if (parts.length !== 3) return null;
+  const [headerB64, payloadB64, sigB64] = parts;
+  let header;
+  try {
+    header = JSON.parse(b64urlDecodeString(headerB64));
+  } catch {
+    return null;
+  }
+  if (header.alg !== "HS256") return null;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(env.AGRI_JWT_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["verify"]
+  );
+  const sig = b64urlDecodeBytes(sigB64);
+  const data = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+  const ok = await crypto.subtle.verify("HMAC", key, sig, data);
+  if (!ok) return null;
+  let claims;
+  try {
+    claims = JSON.parse(b64urlDecodeString(payloadB64));
+  } catch {
+    return null;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  if (claims.exp && claims.exp < now) return null;
+  if (claims.iss !== AGRI_JWT_ISS || claims.aud !== AGRI_JWT_AUD) return null;
+  // Revocation list: a `revoked/<jti>` key in SHARE_KV means /api/auth/logout was called
+  // on this session. The key is written with expirationTtl = original token exp so it
+  // self-cleans. Missing SHARE_KV binding falls back to "not revocable" (PoC tolerant).
+  if (claims.jti && env.SHARE_KV) {
+    const r = await env.SHARE_KV.get(`revoked/${claims.jti}`);
+    if (r) return null;
+  }
+  return claims;
+}
+
+// Identity resolver for ALL identified endpoints. Only accepts our own session JWT
+// in `Authorization: Bearer <agri_jwt>`. The IdP id_token is exchanged for an
+// AgriVision JWT once at /api/auth/dropbox/login — IdP tokens never appear here.
+async function resolveAccount(req, env) {
+  const bearer = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+  if (!bearer) return { error: "missing AgriVision session", status: 401 };
+  const claims = await verifyAgriSession(env, bearer);
+  if (!claims) return { error: "invalid or expired session", status: 401 };
+  return { accountId: claims.sub, email: claims.email || null };
+}
+
+function defaultQuota() {
+  return {
+    photos_count: 0,
+    photos_bytes: 0,
+    tokens_in: 0,
+    tokens_out: 0,
+    // KV writes counter — useful in PoC to keep an eye on the 1k/day free tier; drop in prod.
+    writes: 0,
+    period_start_iso: new Date().toISOString(),
+  };
+}
+
+async function loadQuota(env, accountId) {
+  const raw = await env.SHARE_KV.get(`share/${accountId}/quota.json`);
+  if (!raw) return defaultQuota();
+  let q;
+  try {
+    q = JSON.parse(raw);
+  } catch {
+    return defaultQuota();
+  }
+  // Roll the token-period if 30d elapsed. Photo counters are cumulative (occupied storage).
+  const periodMs = 30 * 86400 * 1000;
+  if (Date.now() - new Date(q.period_start_iso).getTime() > periodMs) {
+    q.tokens_in = 0;
+    q.tokens_out = 0;
+    q.period_start_iso = new Date().toISOString();
+  }
+  return q;
+}
+
+async function saveQuota(env, accountId, q) {
+  await env.SHARE_KV.put(`share/${accountId}/quota.json`, JSON.stringify(q));
+}
+
+// Returns the byte size of a base64 payload (close enough — ignores padding).
+function b64Bytes(b64) {
+  return Math.floor((String(b64 || "").length * 3) / 4);
+}
+
+async function shareSave(req, env, origin) {
+  if (!env.SHARE_KV) return json({ error: "SHARE_KV binding not configured" }, 503, origin);
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  let body;
+  try {
+    body = await req.json();
+  } catch (e) {
+    return json({ error: "invalid json body: " + e.message }, 400, origin);
+  }
+  const { manifest, photos = [] } = body || {};
+  if (!manifest?.culture_id) return json({ error: "manifest.culture_id required" }, 400, origin);
+  const base = `share/${who.accountId}/cultures/${manifest.culture_id}`;
+  const quota = await loadQuota(env, who.accountId);
+  const plan = await loadPlan(env, who.accountId);
+  const limits = quotasForTier(plan.tier);
+
+  // Pre-flight: reject the whole batch if any single photo is oversized, or if accepting
+  // all of them would push the user past their photo count / total-bytes caps. Limits
+  // come from the user's current plan tier.
+  const incomingBytes = photos.reduce((a, p) => a + b64Bytes(p?.b64), 0);
+  const oversized = photos.find((p) => b64Bytes(p?.b64) > limits.max_photo_bytes);
+  if (oversized)
+    return json(
+      {
+        error: "photo_too_large",
+        max_bytes: limits.max_photo_bytes,
+        photo_id: oversized.id,
+        tier: plan.tier,
+      },
+      413,
+      origin
+    );
+  if (quota.photos_count + photos.length > limits.max_photos)
+    return json(
+      {
+        error: "photo_count_exceeded",
+        max_photos: limits.max_photos,
+        current: quota.photos_count,
+        tier: plan.tier,
+      },
+      413,
+      origin
+    );
+  if (quota.photos_bytes + incomingBytes > limits.max_total_bytes)
+    return json(
+      {
+        error: "storage_exceeded",
+        max_bytes: limits.max_total_bytes,
+        current: quota.photos_bytes,
+        tier: plan.tier,
+      },
+      413,
+      origin
+    );
+
+  // Write manifest (always small, never quota-bound).
+  await env.SHARE_KV.put(`${base}/culture.json`, JSON.stringify(manifest), {
+    metadata: { account_email: who.email, updated_at: new Date().toISOString() },
+  });
+  // Write any provided photos (the client tracks which ids it has already uploaded so
+  // these calls are normally incremental).
+  let uploadedPhotos = 0;
+  let uploadedBytes = 0;
+  for (const p of photos) {
+    if (!p?.id || !p?.b64) continue;
+    const key = `${base}/photos/${p.id}`;
+    await env.SHARE_KV.put(key, p.b64, {
+      metadata: { mime: p.mime || "image/jpeg", uploaded_at: new Date().toISOString() },
+    });
+    uploadedPhotos++;
+    uploadedBytes += b64Bytes(p.b64);
+  }
+  quota.photos_count += uploadedPhotos;
+  quota.photos_bytes += uploadedBytes;
+  // Count: manifest + last_sync marker + N photos + 1 for the quota write itself.
+  quota.writes = (quota.writes || 0) + 2 + uploadedPhotos + 1;
+  await saveQuota(env, who.accountId, quota);
+  // Touch a per-account last-sync marker so /api/share/status can report it cheaply.
+  await env.SHARE_KV.put(
+    `share/${who.accountId}/last_sync.json`,
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      culture_id: manifest.culture_id,
+      photos: uploadedPhotos,
+    })
+  );
+  return json({ ok: true, base, uploaded_photos: uploadedPhotos }, 200, origin);
+}
+
+async function shareDelete(req, env, origin) {
+  if (!env.SHARE_KV) return json({ error: "SHARE_KV binding not configured" }, 503, origin);
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  const prefix = `share/${who.accountId}/`;
+  let cursor;
+  let deleted = 0;
+  // CF KV list is paginated; loop until list_complete.
+  // Each KV.delete is one operation — bounded by SHARE_KV rate limits.
+  do {
+    const list = await env.SHARE_KV.list({ prefix, cursor });
+    for (const k of list.keys) {
+      await env.SHARE_KV.delete(k.name);
+      deleted++;
+    }
+    cursor = list.list_complete ? null : list.cursor;
+  } while (cursor);
+  // Note: this loop above already wiped quota.json — counters effectively reset.
+  return json({ ok: true, deleted }, 200, origin);
+}
+
+// ============================================================================
+// Billing (Stripe). Secret: STRIPE_SECRET_KEY (test/live). Webhook secret:
+// STRIPE_WEBHOOK_SECRET (set after creating the webhook endpoint in Stripe).
+// Per-user plan persisted at share/<sub>/plan.json:
+//   { tier: "free"|"standard"|"premium", status, current_period_end,
+//     stripe_customer_id, stripe_subscription_id, updated_at }
+// ============================================================================
+const STRIPE_API = "https://api.stripe.com";
+
+async function stripeApi(env, method, path, params) {
+  const opts = {
+    method,
+    headers: {
+      authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
+      "stripe-version": "2024-11-20.acacia",
+    },
+  };
+  if (params) {
+    opts.headers["content-type"] = "application/x-www-form-urlencoded";
+    opts.body = params instanceof URLSearchParams ? params.toString() : params;
+  }
+  const r = await fetch(`${STRIPE_API}${path}`, opts);
+  return r;
+}
+
+// Resolve a lookup_key → price_id via Stripe API. Edge-cacheable since Prices change rarely.
+async function resolvePriceByLookupKey(env, lookupKey) {
+  const r = await stripeApi(
+    env,
+    "GET",
+    `/v1/prices?lookup_keys[]=${encodeURIComponent(lookupKey)}&active=true&limit=1`
+  );
+  const j = await r.json();
+  return j.data?.[0]?.id || null;
+}
+
+async function loadPlan(env, accountId) {
+  if (!env.SHARE_KV) return { tier: "free", status: "active" };
+  const raw = await env.SHARE_KV.get(`share/${accountId}/plan.json`);
+  if (!raw) return { tier: "free", status: "active" };
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { tier: "free", status: "active" };
+  }
+}
+
+async function savePlan(env, accountId, plan) {
+  if (!env.SHARE_KV) return;
+  await env.SHARE_KV.put(
+    `share/${accountId}/plan.json`,
+    JSON.stringify({ ...plan, updated_at: new Date().toISOString() })
+  );
+}
+
+// POST /api/billing/checkout — { lookup_key, success_url, cancel_url } → { checkout_url }
+// ============================================================================
+// Soil context. Brute-force nearest-N over 22.7k samples is ~5ms — no spatial index
+// needed for PoC. Each call returns the nearest samples (truncated) plus aggregated
+// median values for the user-facing soil card and for AI context injection.
+// ============================================================================
+function soilHaversineKmSq(lat1, lon1, lat2, lon2) {
+  // Squared planar approximation is enough for ranking nearest points at this scale
+  // (Réunion ~2500 km²). We compute true Haversine only on the top-N to report distance.
+  const dy = lat1 - lat2;
+  const dx = (lon1 - lon2) * Math.cos((lat1 * Math.PI) / 180);
+  return dy * dy + dx * dx;
+}
+function soilHaversineKm(lat1, lon1, lat2, lon2) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function median(arr) {
+  const xs = arr.filter((v) => v != null && isFinite(v)).sort((a, b) => a - b);
+  if (xs.length === 0) return null;
+  const mid = Math.floor(xs.length / 2);
+  return xs.length % 2 ? xs[mid] : (xs[mid - 1] + xs[mid]) / 2;
+}
+
+async function soilNearby(req, env, origin) {
+  const url = new URL(req.url);
+  const lat = parseFloat(url.searchParams.get("lat"));
+  const lon = parseFloat(url.searchParams.get("lon"));
+  const n = Math.min(20, Math.max(1, parseInt(url.searchParams.get("n") || "5", 10)));
+  if (!isFinite(lat) || !isFinite(lon)) return json({ error: "lat & lon required" }, 400, origin);
+  // Coarse rectangular pre-filter to avoid scoring all 22.7k samples. ~10km box.
+  const dBox = 0.1; // degrees ≈ 11 km
+  const candidates = [];
+  for (const r of SOIL_DATA.rows) {
+    if (Math.abs(r[0] - lat) > dBox || Math.abs(r[1] - lon) > dBox) continue;
+    candidates.push(r);
+  }
+  // If too few candidates in the box (e.g. user clicked offshore), widen.
+  const sample = candidates.length >= n ? candidates : SOIL_DATA.rows;
+  // Score by squared planar distance, then sort.
+  const scored = sample.map((r) => ({ r, d2: soilHaversineKmSq(lat, lon, r[0], r[1]) }));
+  scored.sort((a, b) => a.d2 - b.d2);
+  const top = scored.slice(0, n).map(({ r }) => ({
+    lat: r[0],
+    lon: r[1],
+    distance_km: Math.round(soilHaversineKm(lat, lon, r[0], r[1]) * 100) / 100,
+    soil_type: SOIL_DATA.soil_types[r[2]] || null,
+    land_use: SOIL_DATA.land_uses[r[3]] || null,
+    year: r[4],
+    pH_H2O: r[5],
+    N_tot_g_kg: r[6],
+    C_org_g_100g: r[7],
+    P_OD_mg_kg: r[8],
+    CEC_cmol_kg: r[9],
+    K_ex_cmol_kg: r[10],
+    Mg_ex_cmol_kg: r[11],
+    Ca_ex_cmol_kg: r[12],
+    Na_ex_cmol_kg: r[13],
+    pF25_g_100g: r[14],
+    pF42_g_100g: r[15],
+  }));
+  // Aggregated medians — the "typical of this zone" summary used by the AI context block.
+  const agg = {
+    pH_H2O: median(top.map((s) => s.pH_H2O)),
+    N_tot_g_kg: median(top.map((s) => s.N_tot_g_kg)),
+    C_org_g_100g: median(top.map((s) => s.C_org_g_100g)),
+    P_OD_mg_kg: median(top.map((s) => s.P_OD_mg_kg)),
+    CEC_cmol_kg: median(top.map((s) => s.CEC_cmol_kg)),
+    K_ex_cmol_kg: median(top.map((s) => s.K_ex_cmol_kg)),
+    Mg_ex_cmol_kg: median(top.map((s) => s.Mg_ex_cmol_kg)),
+    Ca_ex_cmol_kg: median(top.map((s) => s.Ca_ex_cmol_kg)),
+    pF25_g_100g: median(top.map((s) => s.pF25_g_100g)),
+    pF42_g_100g: median(top.map((s) => s.pF42_g_100g)),
+  };
+  // Dominant soil + land-use class (modes).
+  const tally = (arr) =>
+    arr.reduce((acc, v) => {
+      if (!v) return acc;
+      acc[v] = (acc[v] || 0) + 1;
+      return acc;
+    }, {});
+  const dominantOf = (arr) => Object.entries(tally(arr)).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+  return json(
+    {
+      query: { lat, lon, n },
+      samples: top,
+      summary: {
+        dominant_soil_type: dominantOf(top.map((s) => s.soil_type)),
+        dominant_historical_land_use: dominantOf(top.map((s) => s.land_use)),
+        median: agg,
+        samples_count: top.length,
+        nearest_km: top[0]?.distance_km ?? null,
+        source: SOIL_DATA.source,
+      },
+    },
+    200,
+    origin
+  );
+}
+
+// ============================================================================
+// Feedback / contact form. Stores submissions in SHARE_KV under feedback/<ts>-<sub>.
+// Admin can browse them via the wrangler KV UI or a future /api/feedback/list endpoint.
+// ============================================================================
+async function feedbackSubmit(req, env, origin) {
+  if (!env.SHARE_KV)
+    return json({ error: "SHARE_KV not configured — feedback temporarily unavailable" }, 503, origin);
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "bad json body" }, 400, origin);
+  }
+  const subject = String(body?.subject || "").slice(0, 100);
+  const message = String(body?.message || "")
+    .trim()
+    .slice(0, 5000);
+  if (!message) return json({ error: "message required" }, 400, origin);
+  // Optional auth — if a session bearer is sent, attach the sub for correlation.
+  let sub = "anonymous";
+  let email = null;
+  const bearer = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+  if (bearer) {
+    const claims = await verifyAgriSession(env, bearer);
+    if (claims) {
+      sub = claims.sub;
+      email = claims.email;
+    }
+  }
+  const ts = new Date().toISOString();
+  const key = `feedback/${ts.replace(/[:.]/g, "-")}-${sub.slice(0, 60)}`;
+  const record = {
+    sub,
+    email,
+    subject,
+    message,
+    context: body?.context || {},
+    submitted_at: ts,
+    ip: req.headers.get("cf-connecting-ip") || null,
+    country: req.headers.get("cf-ipcountry") || null,
+  };
+  await env.SHARE_KV.put(key, JSON.stringify(record));
+  return json({ ok: true, key }, 200, origin);
+}
+
+// ============================================================================
+// Mistral AI adapter. Accepts an Anthropic-shaped payload, translates to OpenAI-
+// compatible Mistral format, calls the Mistral API, normalizes the response back
+// to Anthropic shape. Per-user token quota uses the same TIER_QUOTAS as Anthropic
+// (we don't double-count: each provider counts its own tokens into the same bucket).
+// ============================================================================
+
+// Translate Anthropic-format messages → Mistral OpenAI-style.
+//   Anthropic: { role, content: [{type:"image", source:{type:"base64",media_type,data}}, {type:"text",text}] }
+//   Mistral:   { role, content: [{type:"image_url", image_url:"data:<mime>;base64,<data>"}, {type:"text",text}] }
+function toMistralMessages(system, messages) {
+  const out = [];
+  if (system) out.push({ role: "system", content: String(system) });
+  for (const m of messages || []) {
+    const role = m.role || "user";
+    if (typeof m.content === "string") {
+      out.push({ role, content: m.content });
+      continue;
+    }
+    const parts = [];
+    for (const block of m.content || []) {
+      if (block?.type === "image" && block.source?.type === "base64") {
+        const mime = block.source.media_type || "image/jpeg";
+        parts.push({
+          type: "image_url",
+          image_url: `data:${mime};base64,${block.source.data}`,
+        });
+      } else if (block?.type === "text") {
+        parts.push({ type: "text", text: block.text || "" });
+      }
+    }
+    out.push({ role, content: parts });
+  }
+  return out;
+}
+
+async function mistralAnalyze(req, env, origin) {
+  if (!env.MISTRAL_API_KEY) return json({ error: "MISTRAL_API_KEY not configured" }, 503, origin);
+  // Same gating as /api/analyze: in production (SHARE_KV bound), require paid plan.
+  let identifiedAccount = null;
+  if (env.SHARE_KV) {
+    const auth = req.headers.get("authorization");
+    if (!auth)
+      return json(
+        {
+          error: "ai_requires_signin",
+          message: "Connecte-toi et passe à un plan payant pour utiliser l'IA.",
+        },
+        402,
+        origin
+      );
+    const who = await resolveAccount(req, env);
+    if (who.error) return json({ error: who.error }, who.status, origin);
+    const plan = await loadPlan(env, who.accountId);
+    const limits = quotasForTier(plan.tier);
+    if (limits.max_tokens_in_per_period === 0)
+      return json(
+        {
+          error: "ai_requires_paid_plan",
+          message: "L'IA est réservée aux plans Standard et Premium.",
+          tier: plan.tier,
+        },
+        402,
+        origin
+      );
+    const q = await loadQuota(env, who.accountId);
+    if (q.tokens_in >= limits.max_tokens_in_per_period)
+      return json(
+        {
+          error: "tokens_in_quota_exceeded",
+          current: q.tokens_in,
+          max: limits.max_tokens_in_per_period,
+          tier: plan.tier,
+        },
+        429,
+        origin
+      );
+    if (q.tokens_out >= limits.max_tokens_out_per_period)
+      return json(
+        {
+          error: "tokens_out_quota_exceeded",
+          current: q.tokens_out,
+          max: limits.max_tokens_out_per_period,
+          tier: plan.tier,
+        },
+        429,
+        origin
+      );
+    identifiedAccount = who.accountId;
+  }
+  let body;
+  try {
+    body = await req.json();
+  } catch (e) {
+    return json({ error: "bad json body: " + e.message }, 400, origin);
+  }
+  const mistralBody = {
+    model: body.model || "pixtral-12b-2409",
+    messages: toMistralMessages(
+      typeof body.system === "string"
+        ? body.system
+        : Array.isArray(body.system)
+          ? body.system.map((s) => s.text).join("\n\n")
+          : "",
+      body.messages
+    ),
+    max_tokens: body.max_tokens || 2000,
+  };
+  const r = await fetch("https://api.mistral.ai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${env.MISTRAL_API_KEY}`,
+    },
+    body: JSON.stringify(mistralBody),
+  });
+  const mj = await r.json();
+  if (!r.ok || mj.error)
+    return json(
+      { error: mj.error?.message || mj.message || "HTTP " + r.status, details: mj },
+      r.status || 500,
+      origin
+    );
+  const text = mj.choices?.[0]?.message?.content ?? "";
+  const usage = mj.usage || {};
+  const inTok = usage.prompt_tokens || 0;
+  const outTok = usage.completion_tokens || 0;
+  // Bump per-user counters using the same TIER_QUOTAS bucket as Anthropic.
+  if (identifiedAccount && env.SHARE_KV) {
+    const q = await loadQuota(env, identifiedAccount);
+    q.tokens_in += inTok;
+    q.tokens_out += outTok;
+    q.writes = (q.writes || 0) + 1;
+    await saveQuota(env, identifiedAccount, q);
+  }
+  // Normalize to Anthropic shape so callers don't fork.
+  return json(
+    {
+      id: mj.id || null,
+      type: "message",
+      role: "assistant",
+      model: mistralBody.model,
+      content: [{ type: "text", text }],
+      usage: { input_tokens: inTok, output_tokens: outTok },
+      provider: "mistral",
+    },
+    200,
+    origin
+  );
+}
+
+async function billingCheckout(req, env, origin) {
+  if (!env.STRIPE_SECRET_KEY) return json({ error: "STRIPE_SECRET_KEY not configured" }, 503, origin);
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "bad json body" }, 400, origin);
+  }
+  const lookupKey = body?.lookup_key;
+  if (!lookupKey) return json({ error: "lookup_key required" }, 400, origin);
+  const tier = tierFromLookupKey(lookupKey);
+  if (!tier) return json({ error: "unknown lookup_key: " + lookupKey }, 400, origin);
+  const priceId = await resolvePriceByLookupKey(env, lookupKey);
+  if (!priceId) return json({ error: "no active Stripe Price with lookup_key=" + lookupKey }, 404, origin);
+
+  // Reuse the existing Stripe customer if we have one, else create + cache.
+  const plan = await loadPlan(env, who.accountId);
+  let customerId = plan.stripe_customer_id || null;
+  if (!customerId) {
+    const cp = new URLSearchParams();
+    if (who.email) cp.append("email", who.email);
+    cp.append("metadata[agri_sub]", who.accountId);
+    const cr = await stripeApi(env, "POST", "/v1/customers", cp);
+    const cj = await cr.json();
+    if (!cj.id) return json({ error: "customer creation failed", details: cj }, 500, origin);
+    customerId = cj.id;
+    plan.stripe_customer_id = customerId;
+    await savePlan(env, who.accountId, plan);
+  }
+
+  // Create the Checkout Session.
+  const p = new URLSearchParams();
+  p.append("mode", "subscription");
+  p.append("customer", customerId);
+  p.append("line_items[0][price]", priceId);
+  p.append("line_items[0][quantity]", "1");
+  p.append("success_url", body.success_url || "https://example.com/?billing=success");
+  p.append("cancel_url", body.cancel_url || "https://example.com/?billing=cancel");
+  // SEPA DD + CB + cards auto-displayed based on customer's country. No dashboard toggle required.
+  p.append("automatic_payment_methods[enabled]", "true");
+  p.append("client_reference_id", who.accountId);
+  p.append("metadata[agri_sub]", who.accountId);
+  p.append("metadata[tier]", tier);
+  p.append("subscription_data[metadata][agri_sub]", who.accountId);
+  p.append("subscription_data[metadata][tier]", tier);
+  const sr = await stripeApi(env, "POST", "/v1/checkout/sessions", p);
+  const sj = await sr.json();
+  if (!sj.url) return json({ error: "checkout session creation failed", details: sj }, 500, origin);
+  return json({ checkout_url: sj.url, session_id: sj.id }, 200, origin);
+}
+
+// POST /api/billing/portal → { portal_url } — Stripe-hosted self-service for the user
+// to manage their subscription (cancel, swap card, view invoices).
+async function billingPortal(req, env, origin) {
+  if (!env.STRIPE_SECRET_KEY) return json({ error: "STRIPE_SECRET_KEY not configured" }, 503, origin);
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  const plan = await loadPlan(env, who.accountId);
+  if (!plan.stripe_customer_id) return json({ error: "no stripe customer for this user yet" }, 404, origin);
+  let body = {};
+  try {
+    body = await req.json();
+  } catch {}
+  const p = new URLSearchParams();
+  p.append("customer", plan.stripe_customer_id);
+  p.append("return_url", body.return_url || "https://example.com/?billing=return");
+  const r = await stripeApi(env, "POST", "/v1/billing_portal/sessions", p);
+  const j = await r.json();
+  if (!j.url) return json({ error: "portal session failed", details: j }, 500, origin);
+  return json({ portal_url: j.url }, 200, origin);
+}
+
+// Verify a Stripe webhook signature (Stripe-Signature header: "t=…,v1=…").
+// Returns the parsed event on success, null on any failure.
+async function verifyStripeWebhook(env, req, rawBody) {
+  const sigHeader = req.headers.get("stripe-signature");
+  if (!sigHeader || !env.STRIPE_WEBHOOK_SECRET) return null;
+  const parts = {};
+  for (const seg of sigHeader.split(",")) {
+    const [k, v] = seg.split("=");
+    if (!parts[k]) parts[k] = [];
+    parts[k].push(v);
+  }
+  const ts = parts.t?.[0];
+  const v1 = parts.v1 || [];
+  if (!ts || v1.length === 0) return null;
+  // Replay protection: 5-minute tolerance.
+  if (Math.abs(Date.now() / 1000 - parseInt(ts, 10)) > 300) return null;
+  const payload = `${ts}.${rawBody}`;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(env.STRIPE_WEBHOOK_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sigBytes = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+  const expected = Array.from(new Uint8Array(sigBytes))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  if (!v1.includes(expected)) return null;
+  try {
+    return JSON.parse(rawBody);
+  } catch {
+    return null;
+  }
+}
+
+// POST /api/billing/webhook — Stripe events that mutate the user's plan in KV.
+// Idempotent: each event_id is stored in `stripe_events/<id>` with a 30-day TTL so retries
+// (Stripe retries up to 3 days) don't double-process.
+async function billingWebhook(req, env, origin) {
+  const rawBody = await req.text();
+  const event = await verifyStripeWebhook(env, req, rawBody);
+  if (!event) return json({ error: "invalid signature" }, 400, origin);
+  if (env.SHARE_KV) {
+    const dedupeKey = `stripe_events/${event.id}`;
+    const seen = await env.SHARE_KV.get(dedupeKey);
+    if (seen) return json({ ok: true, deduped: true }, 200, origin);
+    await env.SHARE_KV.put(dedupeKey, "1", { expirationTtl: 30 * 86400 });
+  }
+  const obj = event.data?.object || {};
+  const agriSub = obj.metadata?.agri_sub || obj.subscription_details?.metadata?.agri_sub;
+
+  // Subscription lifecycle: created / updated / deleted.
+  if (event.type.startsWith("customer.subscription.")) {
+    const sub = obj;
+    const tier = tierFromLookupKey(sub.items?.data?.[0]?.price?.lookup_key) || "free";
+    const finalTier = event.type === "customer.subscription.deleted" ? "free" : tier;
+    if (agriSub) {
+      const plan = await loadPlan(env, agriSub);
+      plan.tier = finalTier;
+      plan.status = sub.status || "active";
+      plan.current_period_end = sub.current_period_end || null;
+      plan.stripe_customer_id = sub.customer || plan.stripe_customer_id;
+      plan.stripe_subscription_id = sub.id;
+      await savePlan(env, agriSub, plan);
+    }
+  }
+  // Invoice events — useful for grace periods and dunning later. PoC just logs status.
+  if (event.type === "invoice.payment_failed" && agriSub) {
+    const plan = await loadPlan(env, agriSub);
+    plan.status = "past_due";
+    await savePlan(env, agriSub, plan);
+  }
+  return json({ ok: true, type: event.type }, 200, origin);
+}
+
+async function shareQuota(req, env, origin) {
+  if (!env.SHARE_KV) return json({ error: "SHARE_KV binding not configured" }, 503, origin);
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  const q = await loadQuota(env, who.accountId);
+  const plan = await loadPlan(env, who.accountId);
+  return json({ quota: q, limits: quotasForTier(plan.tier), plan }, 200, origin);
+}
+
+async function shareStatus(req, env, origin) {
+  if (!env.SHARE_KV) return json({ error: "SHARE_KV binding not configured" }, 503, origin);
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  const raw = await env.SHARE_KV.get(`share/${who.accountId}/last_sync.json`);
+  return json({ enabled: !!raw, last_sync: raw ? JSON.parse(raw) : null }, 200, origin);
+}
 
 function json(obj, status, origin) {
   return new Response(JSON.stringify(obj), {

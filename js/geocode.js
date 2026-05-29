@@ -54,7 +54,12 @@ export function installGeocoding(app) {
       (pos) => {
         const { latitude: lat, longitude: lon } = pos.coords;
         // If a saved crop is about to load, don't pan — its fitBounds will dictate the view.
-        if (!app.getPendingDbxLoad()) app.map.setView([lat, lon], 15);
+        // The Dropbox restore path is the one that calls __initBasemap() afterwards.
+        // Otherwise: pan to the GPS view, THEN install the basemap so tiles fetch once.
+        if (!app.getPendingDbxLoad()) {
+          app.map.setView([lat, lon], 15);
+          window.__initBasemap?.();
+        }
         L.circleMarker([lat, lon], { radius: 6, color: "#4ade80", fillOpacity: 0.8 })
           .addTo(app.map)
           .bindPopup("Position actuelle");
@@ -83,6 +88,10 @@ export function installGeocoding(app) {
       },
       () => {
         statusEl.textContent = "Géoloc refusée/indisponible — vue par défaut : La Réunion.";
+        // No GPS + no Dropbox restore inbound → settle on DEFAULT_VIEW and install basemap
+        // now (don't wait the 8 s safety net). If Dropbox restore IS pending, skip — its
+        // fitBounds will choose the right view.
+        if (!app.getPendingDbxLoad()) window.__initBasemap?.();
       },
       { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 }
     );

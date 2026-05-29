@@ -1,5 +1,83 @@
 # Roadmap
 
+## Multi-AI ensemble — cross-validate suggestions across providers before showing the user
+
+Today every analysis goes through a single Claude model (`claude-haiku-4-5` by default). That's fast and cheap, but every model has its blind spots: Haiku can miss subtle disease symptoms, get cultivars wrong, or be overconfident on a poor-quality photo. Right now the user sees a single "oracle" answer with no cross-check.
+
+**Goal:** treat AI providers as interchangeable adapters, and for high-stakes outputs (disease diagnosis, treatment recommendations, cost projections) ask **at least two** before showing the user. When they agree, show a normal result. When they disagree, surface the disagreement — that's a real signal to the farmer that the field needs more photos / a human agronomist.
+
+**Phasing:**
+
+- **v1 — Provider abstraction**. Extract the Anthropic call out of `analyze.js` + `chat.js` into a `js/ai-client.js` with `ask(provider, { system, messages, schema })`. Backends: Anthropic (existing), Mistral (`mistral-large-latest` + `pixtral-large` for vision), OpenAI (`gpt-4o` for comparison), local Ollama (dev). New Worker secrets: `MISTRAL_API_KEY`, `OPENAI_API_KEY`. Per-provider pricing table in `tokens.js` for honest cost accounting.
+- **v2 — Provider choice per call**. Cheap quick-analyze calls (photo tagging) stay on the cheapest model (Haiku or Mistral Small). The disease funnel + treatment economics — high-stakes — get routed to the _most_ capable model available (Sonnet, Mistral Large, GPT-4o).
+- **v3 — Ensemble mode (parallel)** — available on Standard+. For disease + treatment outputs, fire 2-3 providers in parallel:
+  - All three agree on `name_fr` and `presence_probability_0_1 > 0.5` → show the consensus answer.
+  - Disagreement on identification → show a "L'IA est incertaine" badge and the alternatives, with an "Add a closer photo of …" call-to-action.
+  - Disagreement on treatment economics → surface the range (`€80-€240/ha selon le modèle`) instead of a false-precision single number.
+- **v4 — Conversation-between-AIs (sequential, debating)** — **Premium-only**. For the disease funnel, have model A produce an initial diagnosis with its `evidence.missing` list, then have model B critique it ("what would you ask for that A didn't?"), iterate 1-2 turns, then show the synthesized result to the user. Meaningfully more expensive but the agronomic value is real on edge cases. The Premium upsell narrative: "Sur les diagnostics complexes, ton plan Premium fait débattre deux IA pour t'offrir l'avis le plus fiable."
+
+**Why Mistral specifically:**
+
+- French company, EU data residency on request — relevant for GDPR + DGCCRF compliance on agronomic advice.
+- `pixtral-large` is competitive with Sonnet on vision and ~30% the cost.
+- Independent training data → genuinely orthogonal failure modes from Anthropic (vs OpenAI, where there's more overlap in failure modes due to similar training pipelines).
+
+**Cost implications:**
+
+- Token quotas (Standard 100k in / 20k out, Premium 1M / 200k) are currently sized for single-provider Haiku. Ensemble mode multiplies cost N×. Either keep ensemble paid-only, or route ensemble through the cheapest available provider per slot.
+- Per-provider unit costs go in `tokens.js` `PRICING` so the existing cost-tracker (in `?debug`) keeps working across providers without changing UI.
+
+**Connection to other roadmap items:**
+
+- Depends on the existing BFF auth (already done) — the per-call provider routing decision is a function of the user's tier.
+- The `treatments catalog` work intersects: when two AIs propose different treatments, the catalog acts as the tiebreaker (only one is actually authorized in this region for this crop).
+
+## First-party auth (BFF) — verify IdP signatures, mint our own session JWT
+
+Currently the share/quota feature attributes calls to a user by accepting the Dropbox OIDC `id_token` (header `X-DBX-IdToken`) and decoding the JWT payload in the Worker — **without verifying the signature**. There's a `TODO before prod use` comment but the gap is real: a malicious client can forge any `sub` and deplete or pollute another user's quota.
+
+**Goal:** federated identity → first-party session. The SPA authenticates with any IdP (Dropbox today, Google / GitHub / Apple later), trades the IdP proof for an AgriVision-signed session JWT minted by our Worker, and uses that for all subsequent API calls. The Worker only needs to verify _one_ signature (its own) on steady-state requests.
+
+**Flow:**
+
+```
+SPA  → IdP (Dropbox openid / Google / …)            → IdP id_token (JWT)
+SPA  → POST /api/auth/login { id_token, provider }
+Worker:
+  - Fetch + cache the IdP's JWKS (24h edge cache)
+  - Verify JWT signature with crypto.subtle.verify (RS256)
+  - Verify issuer, audience, exp, nbf
+  - Mint our JWT (HS256 with a CF Worker secret):
+      { sub: "dropbox:<dbx_sub>",   // namespaced per provider
+        aud: "agrivision",
+        iat, exp (~7d),
+        jti,
+        provider: "dropbox",
+        email?: "..." }
+  - Return { agri_session: <jwt> }
+SPA  → stores in localStorage as `agri_session`
+SPA  → Authorization: Bearer <agri_jwt>  on every Worker call
+Worker → HMAC-verify own signature only, read `sub` claim, done.
+```
+
+**Why the BFF JWT and not just keep verifying the IdP token per request?**
+
+- One signature scheme to verify in the hot path, regardless of how many IdPs we add later.
+- We control TTL, audience, and per-request claims (`scope`, `role`, etc.).
+- Revocation is ours: a `revoked_jti` set in KV, checked per request, is enough.
+- Multi-IdP migration is trivial — `sub` is namespaced (`dropbox:…`, `google:…`), so KV keys don't shift even if the user later swaps IdP.
+- Honors the [CLAUDE.md security rule](./CLAUDE.md#security-never-store-user-secrets-in-our-own-databases): the user's IdP access token / refresh token never touches our servers.
+
+**Phasing:**
+
+- **v0 (now)**: this entry exists; PoC keeps the unverified-decode path with the comment.
+- **v1**: Dropbox-only login. `POST /api/auth/dropbox/login` fetches `https://www.dropbox.com/.well-known/openid-configuration`, caches the JWKS, verifies RS256 signature, mints HS256 AgriVision JWT. New CF secret `AGRI_JWT_SECRET`. Swap `X-DBX-IdToken` → `Authorization: Bearer <agri_jwt>` in share + analyze attribution. About 100 LOC.
+- **v2**: Google login (`accounts.google.com` JWKS). Same `/api/auth/google/login` endpoint, new `sub` prefix.
+- **v3**: refresh + revocation. `POST /api/auth/refresh` issues a new JWT (sliding session). `revoked_jti` set in KV, checked on every Worker call; `POST /api/auth/logout` adds the current `jti` to that set with TTL = JWT exp.
+- **v4**: optional — HttpOnly cookie carrier instead of localStorage Authorization header, once we host the SPA on a domain we control (mitigates XSS-driven token exfiltration).
+
+**Until v1 lands**, anything that depends on identified-user state (share quotas, server-side token limits, cross-device sync) is best treated as a tampering-tolerant PoC. Don't expose data that's sensitive on a per-user basis through endpoints that authenticate via the unverified id_token path.
+
 ## Treatments catalog — cross-disease coverage + combo-pass deduplication
 
 Today every disease in Claude's response carries its own `treatments` array with self-contained `name`, `success_probability_0_1`, `recovery_pct`, and `cost_breakdown`. The combined-strategy panel in `metrics.js` does multiplicative loss modeling on top of that, which is honest about probabilities, **but** it still has two pretend-it's-not-there gaps:

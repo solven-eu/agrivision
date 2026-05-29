@@ -160,13 +160,19 @@ function initBasemap() {
     attribution: "© OpenStreetMap",
   }).addTo(map);
 }
-const _pendingDbxLoadAtBoot = !!localStorage.getItem("dbx_token");
-if (!_pendingDbxLoadAtBoot) initBasemap();
-// Safety net: if for any reason autoReload never fires, install the basemap after 4 s.
+// Basemap install is now ALWAYS deferred to avoid the boot-time tile cascade:
+//   1. setView(DEFAULT_VIEW) → tiles for La Réunion fetched
+//   2. Geolocation succeeds → setView([lat,lon]) → tiles for GPS fetched
+//   3. Dropbox restore completes → fitBounds(parcels) → tiles for parcels fetched
+// Only the last view matters. The basemap is installed exactly once, when one of these
+// signals has set the *final* viewport:
+//   - geolocation success/failure → geocode.js calls window.__initBasemap()
+//   - Dropbox restore completes → persistence.js calls window.__initBasemap()
+//   - Hard safety net at 8 s (covers the case where geolocation is ignored + no token)
 setTimeout(() => {
   if (!_basemapInstalled) initBasemap();
-}, 4000);
-window.__initBasemap = initBasemap; // exposed so persistence.js can trigger it post-restore
+}, 8000);
+window.__initBasemap = initBasemap; // exposed so persistence.js + geocode.js can trigger it
 
 import { installSunCompass } from "./sun.js";
 const sunCompass = installSunCompass(map);
@@ -701,6 +707,10 @@ if (!localStorage.getItem("agri_tutorial_seen")) {
   setTimeout(showTutorial, 400);
 }
 window.showTutorial = showTutorial; // exposed so the hamburger can re-launch it
+
+// Handle Stripe Checkout return URL: ?billing=success → toast + refetch the user's
+// plan/quota so the new tier appears immediately in the share panel.
+handleBillingReturn(() => share.fetchQuota());
 document.getElementById("show-tutorial-btn")?.addEventListener("click", () => {
   document.getElementById("app-menu-panel").style.display = "none";
   showTutorial();
@@ -714,6 +724,14 @@ if (_appMenuBtn && _appMenuPanel) {
   _appMenuBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     _appMenuPanel.style.display = _appMenuPanel.style.display === "none" ? "block" : "none";
+    if (_appMenuPanel.style.display === "block") {
+      share.render();
+      share.fetchQuota();
+      // Plans card: fetch quota first so we know the current tier, then render.
+      // Falls back to "free" when offline / unauthenticated.
+      const tier = (window.__lastPlanTier ||= "free");
+      renderPlansCard("plans-panel", tier);
+    }
   });
   document.addEventListener("click", (e) => {
     if (
@@ -733,6 +751,30 @@ function openChatSection() {
 }
 document.getElementById("chat-start")?.addEventListener("click", openChatSection);
 document.getElementById("report-btn")?.addEventListener("click", openChatSection);
+
+// ============ Share with AgriVision (opt-in KV mirror) ============
+import { createShare, tradeDropboxIdTokenForSession, maybeRefreshSession } from "./share.js";
+import { renderPlansCard, handleBillingReturn } from "./billing.js";
+// Boot-time identity housekeeping:
+// 1. If an old id_token is present without a session, mint one (backfill for users
+//    who connected before /api/auth/dropbox/login existed).
+// 2. Otherwise opportunistically refresh a near-expiry session so the user doesn't
+//    hit a 401 mid-action.
+(() => {
+  if (!localStorage.getItem("agri_session")) {
+    const idTok = localStorage.getItem("dbx_id_token");
+    if (idTok) tradeDropboxIdTokenForSession(idTok, DROPBOX_APP_KEY).catch(() => {});
+  } else {
+    maybeRefreshSession().catch(() => {});
+  }
+})();
+const share = createShare({
+  get photos() {
+    return photos;
+  },
+  getAnalysisCombined: () => analysisCombined,
+});
+window.share = share; // expose for debugging
 
 // ============ Dropbox persistence (extracted) ============
 import { createDbx } from "./persistence.js";
@@ -759,6 +801,8 @@ const DBX = createDbx({
   renderParcelInfoPanel,
   updateLockHint,
   updateAnalyzeAvailability,
+  // Opt-in share-with-AgriVision hook: invoked by persistence.js after a confirmed save.
+  onShareSync: (manifest) => share.syncNow(manifest),
   // Accessors for reassigned scalars:
   getAnalysisCombined: () => analysisCombined,
   setAnalysisCombined: (v) => {
@@ -806,7 +850,42 @@ new MutationObserver(onInputsChanged).observe(document.getElementById("parcel-in
 });
 
 // Analysis → Dropbox save is now wired directly inside analyze() via DBX.setAnalysis.
-initDebug({ dbx: DBX });
+initDebug({
+  dbx: DBX,
+  get photos() {
+    return photos;
+  },
+});
+
+// Events feed (meteo + RSS aggregator) — extracted to js/events.js
+import { createEvents } from "./events.js";
+import { createVigicruesWidget } from "./vigicrues.js";
+const _eventsAppCtx = {
+  get map() {
+    return map;
+  },
+  get selectedParcels() {
+    return selectedParcels;
+  },
+  getCurrentAddress: () => currentAddress,
+};
+const events = createEvents(_eventsAppCtx);
+const vigicrues = createVigicruesWidget(_eventsAppCtx);
+document.getElementById("events-refresh")?.addEventListener("click", () => {
+  events.refresh();
+  vigicrues.render();
+});
+// Auto-load once the user opens the section (no eager load at boot).
+document.getElementById("events-section")?.addEventListener(
+  "toggle",
+  (e) => {
+    if (e.target.open) {
+      if (!document.getElementById("events-list").children.length) events.refresh();
+      vigicrues.init();
+    }
+  },
+  { once: false }
+);
 
 // Map click router — extracted to js/router.js
 import { installMapClickRouter } from "./router.js";

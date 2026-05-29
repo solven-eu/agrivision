@@ -347,7 +347,16 @@ export function createPhotos(app) {
     // Fire-and-forget per-photo analysis. Sets `photo.analyzing = true` immediately so
     // the next renderPhotos shows a spinner; the analyzer flips it back and re-renders
     // when done. We don't await — the user keeps interacting freely.
-    if (app.analyzePhoto) {
+    // Automated photo analysis fires ONLY for photos that haven't been analyzed yet
+    // (no `tags.analyzed_at` marker). This means:
+    //   - Fresh uploads from camera / file picker → analyzed automatically (always have no
+    //     analyzed_at at first).
+    //   - Photos restored from Dropbox with existing analysis → skipped (analyzed_at is
+    //     persisted in the manifest, so it survives restore).
+    //   - Swapping the AI provider does NOT re-analyze existing photos. The user can
+    //     trigger a re-analysis manually via the 🔬 button per photo, which is the only
+    //     code path that runs analysis on already-tagged photos.
+    if (app.analyzePhoto && !photo.tags?.analyzed_at) {
       photo.analyzing = true;
       app.analyzePhoto(photo).catch((e) => {
         console.warn("per-photo analysis failed:", e.message);

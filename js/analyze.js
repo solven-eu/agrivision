@@ -3,11 +3,14 @@
 // schema (identification + health + phenology + yield + market + diseases + photo_tags +
 // cross_check). Distinct from the conversational chat module (which makes lighter, cheaper turns).
 
-import { WORKER_URL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL } from "./config.js";
+import { WORKER_URL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL, MISTRAL_MODEL } from "./config.js";
+import { ask } from "./ai-providers.js";
 import { SYSTEM_PROMPT, buildContextBlock } from "./prompts.js";
 import { FULL_REPORT_SCHEMA, DISEASES_SCHEMA, PHOTO_TAG_SCHEMA } from "./schemas.js";
 import { aggregateParcels } from "./state.js";
 import { robustParseJson } from "./util.js";
+import { shareAttribHeaders } from "./share.js";
+import { handleAiAccessError } from "./billing.js";
 
 /**
  * @param {object} app - dependency bundle:
@@ -120,7 +123,7 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
       ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze`
       : "https://api.anthropic.com/v1/messages";
     const headers = useWorker
-      ? { "content-type": "application/json", "anthropic-version": "2023-06-01" }
+      ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...shareAttribHeaders() }
       : {
           "content-type": "application/json",
           "x-api-key": ANTHROPIC_API_KEY,
@@ -131,7 +134,10 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
     try {
       const r = await fetch(url, { method: "POST", headers, body: payload });
       const j = await r.json();
-      if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+      if (j.error) {
+        if (handleAiAccessError(j)) return;
+        throw new Error(j.message || j.error.message || JSON.stringify(j.error));
+      }
       app.onUsage?.(j.usage, ANTHROPIC_MODEL);
       const rawText = j.content?.[0]?.text || "";
       document.getElementById("raw").textContent = rawText;
@@ -239,7 +245,7 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
       ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze`
       : "https://api.anthropic.com/v1/messages";
     const headers = useWorker
-      ? { "content-type": "application/json", "anthropic-version": "2023-06-01" }
+      ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...shareAttribHeaders() }
       : {
           "content-type": "application/json",
           "x-api-key": ANTHROPIC_API_KEY,
@@ -258,7 +264,10 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
         }),
       });
       const j = await r.json();
-      if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+      if (j.error) {
+        if (handleAiAccessError(j)) return;
+        throw new Error(j.message || j.error.message || JSON.stringify(j.error));
+      }
       app.onUsage?.(j.usage, ANTHROPIC_MODEL);
       const parsed = robustParseJson(j.content?.[0]?.text || "");
       const merged = { ...current };
@@ -326,7 +335,7 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
       ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze`
       : "https://api.anthropic.com/v1/messages";
     const headers = useWorker
-      ? { "content-type": "application/json", "anthropic-version": "2023-06-01" }
+      ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...shareAttribHeaders() }
       : {
           "content-type": "application/json",
           "x-api-key": ANTHROPIC_API_KEY,
@@ -345,7 +354,10 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
         }),
       });
       const j = await r.json();
-      if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+      if (j.error) {
+        if (handleAiAccessError(j)) return;
+        throw new Error(j.message || j.error.message || JSON.stringify(j.error));
+      }
       app.onUsage?.(j.usage, ANTHROPIC_MODEL);
       const parsed = robustParseJson(j.content?.[0]?.text || "");
       const merged = { ...current };
@@ -378,50 +390,64 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
 
   // Per-photo analysis. Fired automatically on upload and on the 🔬 button click.
   // Single-image payload, narrow PHOTO_TAG_SCHEMA. Mutates `photo.tags` and re-renders.
+  //
+  // v2: routes to Mistral Pixtral-12B (~1/7 the cost of Claude Haiku for the same task).
+  // No prompt caching → use a tight system prompt instead of the giant SYSTEM_PROMPT.
+  // Falls back to Anthropic automatically if the Worker reports MISTRAL_API_KEY missing.
   async function analyzePhoto(photo) {
     if (!WORKER_URL && !ANTHROPIC_API_KEY) {
       photo.analyzing = false;
       return;
     }
     const schema = JSON.stringify(PHOTO_TAG_SCHEMA, null, 2);
-    const userText = `Analyse cette UNIQUE photo de manière autonome — ne suppose pas d'autres photos.
+    const tightSystem = `Tu es un assistant agronome FR qui annote une photo soumise par un agriculteur.
 
-Renvoie un objet JSON conforme au schéma suivant (photo_index = 1) :
-${schema}
+ÉTAPE 1 — Classifie le contenu (\`content_type\`) :
+- 'crop_field', 'single_plant', 'plant_detail' → photo agricole, remplis tous les champs normalement.
+- 'administrative_document' → facture, courrier MSA, déclaration PAC, etc. Met shot_type='unknown' et la plupart des champs agronomiques à null. Mets dans \`observation\` un résumé d'1 phrase de ce que tu vois ("facture EDF, montant 245 €, échéance 15 juin").
+- 'phyto_label' → étiquette/emballage produit phyto. observation = nom commercial + matière active + dose si lisibles.
+- 'map_or_plan' → plan, carte. observation = ce que représente le plan.
+- 'equipment' → matériel agricole. observation = type de matériel.
+- 'unknown_or_unrelated' → hors cadre. observation = "photo non agricole".
 
-Sois honnête sur ce qui n'est pas évaluable (mets null). Format : UNIQUEMENT le JSON. Pas de markdown.`;
+ÉTAPE 2 — Remplis les autres champs uniquement si pertinents pour ce content_type.
+
+Tu retournes UNIQUEMENT un objet JSON conforme au schéma. Pas de markdown, pas de texte hors JSON. Utilise null pour ce qui n'est pas évaluable — n'invente jamais.`;
+    const userText = `Analyse cette UNIQUE photo. Renvoie un objet JSON conforme à ce schéma (photo_index = 1) :
+${schema}`;
     const content = [
       { type: "image", source: { type: "base64", media_type: photo.mime, data: photo.b64 } },
       { type: "text", text: userText },
     ];
-    const useWorker = !!WORKER_URL;
-    const url = useWorker
-      ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze`
-      : "https://api.anthropic.com/v1/messages";
-    const headers = useWorker
-      ? { "content-type": "application/json", "anthropic-version": "2023-06-01" }
-      : {
-          "content-type": "application/json",
-          "x-api-key": ANTHROPIC_API_KEY,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        };
+    const payload = {
+      max_tokens: 800,
+      system: tightSystem,
+      messages: [{ role: "user", content }],
+    };
+    let providerUsed = "mistral";
+    let modelUsed = MISTRAL_MODEL;
+    let result;
     try {
-      const r = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          model: ANTHROPIC_MODEL,
-          max_tokens: 800,
-          system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
-          messages: [{ role: "user", content }],
-        }),
-      });
-      const j = await r.json();
-      if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
-      app.onUsage?.(j.usage, ANTHROPIC_MODEL);
-      const parsed = robustParseJson(j.content?.[0]?.text || "");
-      photo.tags = { ...(photo.tags || {}), ...parsed, analyzed_at: new Date().toISOString() };
+      result = await ask("mistral", payload);
+      // 503 = MISTRAL_API_KEY not configured on the Worker → automatic Anthropic fallback.
+      if (!result.ok && result.status === 503) {
+        result = await ask("anthropic", { ...payload, system: SYSTEM_PROMPT });
+        providerUsed = "anthropic";
+        modelUsed = ANTHROPIC_MODEL;
+      }
+      if (!result.ok) {
+        if (handleAiAccessError(result.body)) return;
+        throw new Error(result.body?.message || result.body?.error?.message || JSON.stringify(result.body));
+      }
+      app.onUsage?.(result.body.usage, modelUsed);
+      const text = result.body?.content?.[0]?.text || "";
+      const parsed = robustParseJson(text);
+      photo.tags = {
+        ...(photo.tags || {}),
+        ...parsed,
+        analyzed_at: new Date().toISOString(),
+        analyzed_by: providerUsed,
+      };
     } catch (e) {
       console.warn("analyzePhoto error:", e.message);
     } finally {

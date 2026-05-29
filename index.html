@@ -199,6 +199,9 @@
             min="0"
             step="0.5"
             placeholder="Auto (≈25 métro / 22 DOM)"
+            autocomplete="off"
+            data-lpignore="true"
+            data-form-type="other"
             style="
               width: 100%;
               padding: 6px;
@@ -233,6 +236,30 @@
               margin-top: 12px;
               padding-top: 10px;
               border-top: 1px solid var(--border);
+              font-size: 11px;
+              color: var(--muted);
+            "
+          >
+            Partage avec AgriVision
+          </div>
+          <div id="share-panel" style="margin-top: 4px"></div>
+          <div
+            style="
+              margin-top: 12px;
+              padding-top: 10px;
+              border-top: 1px solid var(--border);
+              font-size: 11px;
+              color: var(--muted);
+            "
+          >
+            Plans
+          </div>
+          <div id="plans-panel" style="margin-top: 4px"></div>
+          <div
+            style="
+              margin-top: 12px;
+              padding-top: 10px;
+              border-top: 1px solid var(--border);
               display: flex;
               justify-content: flex-end;
             "
@@ -250,7 +277,14 @@
 
         <h2>1. Adresse</h2>
         <div class="row">
-          <input id="addr" type="text" placeholder="ex: 12 rue de la Mairie, Saint-Émilion" />
+          <input
+            id="addr"
+            type="text"
+            placeholder="ex: 12 rue de la Mairie, Saint-Émilion"
+            autocomplete="off"
+            data-lpignore="true"
+            data-form-type="other"
+          />
           <button id="go">→</button>
         </div>
         <div id="status"></div>
@@ -316,6 +350,32 @@
         </details>
         <div id="parcel-info"></div>
 
+        <details class="advanced" id="events-section">
+          <summary>📰 Événements<span id="events-count"></span></summary>
+          <div
+            id="vigicrues-stations"
+            style="
+              margin-top: 6px;
+              padding: 6px 8px;
+              border: 1px solid var(--border);
+              border-radius: 4px;
+              background: var(--panel2);
+            "
+          ></div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 6px">
+            <span id="events-last" class="small" style="color: var(--muted)"
+              >Cliquer Actualiser pour charger.</span
+            >
+            <button id="events-refresh" class="secondary" style="font-size: 11px; padding: 4px 8px">
+              ↻ Actualiser
+            </button>
+          </div>
+          <div
+            id="events-list"
+            style="margin-top: 6px; display: flex; flex-direction: column; gap: 4px"
+          ></div>
+        </details>
+
         <details class="advanced" id="photos-section" open>
           <summary>📷 <span id="photos-summary-count">Photos de la culture</span></summary>
           <div class="small" style="margin-top: 6px">
@@ -355,6 +415,9 @@
                   id="chat-text"
                   type="text"
                   placeholder="Question, commentaire, ou les deux…"
+                  autocomplete="off"
+                  data-lpignore="true"
+                  data-form-type="other"
                   style="flex: 1; font-size: 12px; padding: 6px 8px"
                 />
                 <button
@@ -443,6 +506,14 @@
               title="Dumps every image URL the fallback chain has resolved — paste into catalog.json"
             >
               📋 Catalogue d'images
+            </button>
+            <button
+              class="secondary"
+              id="dbg-compare-ai"
+              style="font-size: 11px; padding: 4px 8px"
+              title="Calls Claude + Mistral in parallel on the first photo and shows both answers"
+            >
+              🆎 Compare AI
             </button>
           </div>
           <div

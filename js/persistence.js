@@ -5,6 +5,8 @@
 // portable: it doesn't reach into main.js's scope; main.js explicitly wires the dependencies.
 
 import { DROPBOX_APP_KEY, DROPBOX_REDIRECT_URI } from "./config.js";
+import { tradeDropboxIdTokenForSession, logoutSession } from "./share.js";
+import { ensureSoilForSelected } from "./soil.js";
 
 /**
  * @param {object} app - dependency bundle:
@@ -138,6 +140,11 @@ export function createDbx(app) {
       code_challenge: challenge,
       code_challenge_method: "S256",
       token_access_type: "offline",
+      // OpenID Connect: requesting `openid` gets us an id_token (JWT) in the token response.
+      // The JWT's `sub` claim is the user's stable Dropbox account_id, so the Worker can
+      // identify the user by signature-verifying the JWT — no need to forward the bearer.
+      // The app must have the `openid` scope enabled in the Dropbox App console too.
+      scope: "openid",
     });
     if (DROPBOX_REDIRECT_URI) params.set("redirect_uri", DROPBOX_REDIRECT_URI);
     const url = `https://www.dropbox.com/oauth2/authorize?${params}`;
@@ -165,6 +172,15 @@ export function createDbx(app) {
     state.refresh = j.refresh_token || null;
     localStorage.setItem(LS.token, state.token);
     if (state.refresh) localStorage.setItem(LS.refresh, state.refresh);
+    // OpenID Connect id_token (JWT). Present when scope=openid was granted. Used ONCE to
+    // mint an AgriVision session JWT at /api/auth/dropbox/login; after that we use the
+    // AgriVision session (`agri_session` in localStorage) for all backend calls.
+    if (j.id_token) {
+      localStorage.setItem("dbx_id_token", j.id_token);
+      // Fire-and-forget — if the Worker is unreachable / not configured, share calls just
+      // stay anonymous. The user sees the error in the share panel.
+      tradeDropboxIdTokenForSession(j.id_token, DROPBOX_APP_KEY).catch(() => {});
+    }
     sessionStorage.removeItem(LS.verifier);
   }
 
@@ -183,6 +199,11 @@ export function createDbx(app) {
     const j = await r.json();
     state.token = j.access_token;
     localStorage.setItem(LS.token, state.token);
+    if (j.id_token) {
+      localStorage.setItem("dbx_id_token", j.id_token);
+      // Refresh our session too — keeps the user signed in across sliding windows.
+      tradeDropboxIdTokenForSession(j.id_token, DROPBOX_APP_KEY).catch(() => {});
+    }
     return true;
   }
 
@@ -203,6 +224,10 @@ export function createDbx(app) {
     state.refresh = null;
     localStorage.removeItem(LS.token);
     localStorage.removeItem(LS.refresh);
+    localStorage.removeItem("dbx_id_token");
+    // Server-side logout: revokes the JWT jti in KV so a leaked copy can't be reused
+    // for the remainder of its TTL. Clears local agri_session keys too. Fire-and-forget.
+    logoutSession().catch(() => {});
   }
 
   async function uploadFile(path, body, mode = "overwrite") {
@@ -300,6 +325,10 @@ export function createDbx(app) {
       renderPanel(
         `✓ ${new Date().toLocaleTimeString("fr-FR")} · ${manifest.parcels.length} parc. · ${manifest.photos.length} ph.`
       );
+      // Opt-in "Share with AgriVision" — fire-and-forget mirror of the manifest into KV.
+      // Runs after the Dropbox save is confirmed so KV never gets ahead of the user's
+      // own copy. Silent if disabled.
+      app.onShareSync?.(manifest);
     } catch (e) {
       setSaveStatus("error");
       renderPanel(`Erreur : ${e.message}`);
@@ -436,11 +465,20 @@ export function createDbx(app) {
       // Parcels
       for (const p of manifest.parcels || []) {
         const id = app.featureKey({ properties: p.props });
-        app.selectedParcels.set(id, { props: p.props, geometry: p.geometry, latlng: p.latlng });
+        app.selectedParcels.set(id, {
+          props: p.props,
+          geometry: p.geometry,
+          latlng: p.latlng,
+          soil: null,
+          soilFetched: false,
+        });
       }
       app.renderParcelHighlight();
       app.renderParcelInfoPanel();
       app.updateLockHint();
+      // After restore, kick off soil lookups for each parcel so the AI context block + the
+      // soil card pick them up. Fire-and-forget — the panel re-renders progressively.
+      ensureSoilForSelected(app.selectedParcels, () => app.renderParcelInfoPanel());
 
       // Photos: download each blob and rehydrate
       const total = (manifest.photos || []).length;
@@ -656,7 +694,7 @@ export function createDbx(app) {
       panel.innerHTML = `
         <button class="secondary" id="dbx-connect" style="font-size:11px;padding:4px 8px">☁ Connecter Dropbox</button>
         <div id="dbx-code-row" style="display:none;margin-top:6px">
-          <input id="dbx-code" type="text" placeholder="Coller le code…" style="font-size:11px;padding:4px 6px" />
+          <input id="dbx-code" type="text" placeholder="Coller le code…" autocomplete="off" data-lpignore="true" data-form-type="other" style="font-size:11px;padding:4px 6px" />
           <button class="secondary" id="dbx-submit" style="font-size:11px;padding:4px 8px;margin-top:4px">Valider</button>
         </div>
         <div id="dbx-msg" class="small" style="margin-top:6px"></div>

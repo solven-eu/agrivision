@@ -11,6 +11,11 @@ const PRICING = {
   "claude-haiku-4-5": { input: 1.0, output: 5.0, cacheWrite: 1.25, cacheRead: 0.1 },
   "claude-sonnet-4-5": { input: 3.0, output: 15.0, cacheWrite: 3.75, cacheRead: 0.3 },
   "claude-opus-4-1": { input: 15.0, output: 75.0, cacheWrite: 18.75, cacheRead: 1.5 },
+  // Mistral — no prompt caching at this time, so cacheWrite/cacheRead = input price.
+  "pixtral-12b-2409": { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.15 },
+  "pixtral-large-latest": { input: 2.0, output: 6.0, cacheWrite: 2.0, cacheRead: 2.0 },
+  "mistral-small-latest": { input: 0.2, output: 0.6, cacheWrite: 0.2, cacheRead: 0.2 },
+  "mistral-large-latest": { input: 2.0, output: 6.0, cacheWrite: 2.0, cacheRead: 2.0 },
 };
 
 /** Return USD cost for one Anthropic `usage` block, given the model name. */

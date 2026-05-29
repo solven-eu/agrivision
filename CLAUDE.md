@@ -36,3 +36,17 @@ Concretely the app helps a user:
 ## Roadmap
 
 See [`ROADMAP.md`](./ROADMAP.md) for queued enhancements (map rotation for elongated parcels, etc.).
+
+## Security: never store user secrets in our own databases
+
+**Strict rule, no exceptions without explicit confirmation from the user.**
+
+We never persist a user's secret material — Dropbox access/refresh tokens, OAuth bearers, API keys, passwords, raw OIDC id_tokens beyond a request's lifetime — into any storage we control (Cloudflare KV, R2, D1, logs, manifests, etc.). The user's secrets stay in the user's browser (localStorage / sessionStorage) and are forwarded only transiently to operations that need them. Identity for our backend is derived from verifiable claims (e.g. an OIDC `sub`), not from holding the keys.
+
+When designing a feature that _might_ require server-side custody of credentials (e.g. background sync, scheduled jobs, refresh on the user's behalf), do not assume it's OK — **ask the user first**, list the alternatives (signed claims, short-lived session tokens minted by us, OAuth on-behalf-of), and only proceed once the user has explicitly approved the chosen approach with awareness of the trust tradeoff.
+
+## Abuse tolerance: quotas are the ceiling, not rate-limiting
+
+We accept some abuse as long as **token + photo + storage + KV-write quotas are enforced server-side per user**. A determined abuser can still send junk through `/api/analyze` or `/api/feedback`, but they cannot exceed their plan's caps — and Free is capped tight (no AI, 5 photos, 50 MB). The cost ceiling is therefore bounded by the plan we sold them.
+
+Do not reflexively add IP-based rate-limiting, captchas, or moderation-AI gates on the front of `/api/*` routes unless concrete abuse patterns show up in logs. Premature defenses cost UX (mobile users behind NAT get false-positive blocked) and engineering time. The quota architecture is the right ceiling for a PoC and reasonably for early prod.

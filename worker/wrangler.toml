@@ -5,3 +5,29 @@ compatibility_date = "2025-01-01"
 # To lock down CORS to a specific origin (replace * with your hosting URL):
 # [vars]
 # ALLOWED_ORIGIN = "https://agrivision.example.com"
+
+# AgriVision session JWT secret. Used to sign HS256 session tokens minted at
+# /api/auth/dropbox/login. Generate with: openssl rand -hex 32
+# Then: wrangler secret put AGRI_JWT_SECRET
+# Without it, the /api/auth/* and identified endpoints return 503.
+
+# Mistral AI (second provider, optional):
+#   wrangler secret put MISTRAL_API_KEY
+# Get a key from https://console.mistral.ai/api-keys/. Without this, /api/mistral
+# returns 503; existing Anthropic routes continue to work unchanged.
+
+# Stripe secrets:
+#   wrangler secret put STRIPE_SECRET_KEY     # sk_test_… (test) or sk_live_… (prod)
+#   wrangler secret put STRIPE_WEBHOOK_SECRET # whsec_… from Stripe → Webhooks → endpoint
+# The webhook secret is set AFTER you create the webhook endpoint in Stripe
+# (Dashboard → Developers → Webhooks → + Add endpoint, pointing at
+# https://<your-worker>.workers.dev/api/billing/webhook with these events:
+# customer.subscription.created/updated/deleted, invoice.payment_failed).
+
+# KV namespace for the opt-in "Share with AgriVision" feature.
+# Create one with:   wrangler kv namespace create SHARE_KV
+# Then replace <ID> below with the printed id (and re-deploy).
+# Leaving this commented disables the share endpoints (they 503 cleanly).
+# [[kv_namespaces]]
+# binding = "SHARE_KV"
+# id = "<ID>"

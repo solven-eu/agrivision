@@ -7,6 +7,8 @@ import { WORKER_URL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL } from "./config.js";
 import { CHAT_SYSTEM_PROMPT, buildContextBlock } from "./prompts.js";
 import { aggregateParcels } from "./state.js";
 import { robustParseJson } from "./util.js";
+import { shareAttribHeaders } from "./share.js";
+import { handleAiAccessError } from "./billing.js";
 
 /**
  * @param {object} app - dependency bundle:
@@ -303,7 +305,101 @@ export function createChat(app) {
       alert("Cliquez une parcelle supplémentaire sur la carte (zoom ≥ 12).");
       return null;
     },
+
+    // Off-topic / bug / feature request → open the contact form. The submitted feedback
+    // goes to the Worker `/api/feedback` route which stores it in KV under the user's
+    // account. The user gets a "merci, on regarde ça" confirmation; the AI then has a
+    // canonical "user has been redirected to the form, drop this thread" cue to come back.
+    contact_admin: async () => {
+      const result = await openFeedbackModal();
+      if (!result) return null;
+      return {
+        followup_text: `[contact_admin] L'utilisateur a soumis le formulaire (sujet: "${result.subject}"). Confirme-lui en une phrase que l'équipe AgriVision a bien reçu sa demande, et reviens sur le contexte agricole — il n'y a rien à ajouter sur la demande envoyée.`,
+      };
+    },
   };
+
+  // Lightweight feedback form modal. Submits to /api/feedback with the AgriVision session
+  // bearer when present (admin can correlate by sub); falls back to anonymous otherwise.
+  async function openFeedbackModal() {
+    return new Promise((resolve) => {
+      const modal = document.createElement("div");
+      modal.style.cssText =
+        "position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:20px";
+      modal.innerHTML = `
+        <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:20px;max-width:480px;width:100%;display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <h3 style="margin:0;font-size:16px">✉️ Contacter l'équipe AgriVision</h3>
+            <button data-close style="background:transparent;border:0;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">×</button>
+          </div>
+          <div class="small" style="color:var(--muted)">Bug, suggestion, ou question hors agriculture ? Écris-nous ici — on lit tout.</div>
+          <label class="small" style="margin-top:6px">Sujet</label>
+          <select id="fb-subject" autocomplete="off" data-lpignore="true" data-form-type="other" style="padding:6px;border-radius:4px;border:1px solid var(--border);background:var(--panel2);color:var(--text);font-size:12px">
+            <option value="bug">🐛 Bug</option>
+            <option value="feature">💡 Demande de fonctionnalité</option>
+            <option value="account">🤝 Question sur le compte / facturation</option>
+            <option value="offtopic">🤔 Question hors agriculture</option>
+            <option value="other">Autre</option>
+          </select>
+          <label class="small">Message</label>
+          <textarea id="fb-message" rows="5" placeholder="Décris ta demande…" autocomplete="off" data-lpignore="true" data-form-type="other" style="padding:6px;border-radius:4px;border:1px solid var(--border);background:var(--panel2);color:var(--text);font-size:12px;resize:vertical;min-height:80px"></textarea>
+          <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
+            <button data-cancel class="secondary" style="font-size:12px;padding:6px 12px">Annuler</button>
+            <button data-send style="font-size:12px;padding:6px 12px">Envoyer</button>
+          </div>
+          <div id="fb-status" class="small" style="margin-top:2px"></div>
+        </div>`;
+      document.body.appendChild(modal);
+      const close = (v) => {
+        modal.remove();
+        resolve(v);
+      };
+      modal.querySelector("[data-close]").onclick = () => close(null);
+      modal.querySelector("[data-cancel]").onclick = () => close(null);
+      modal.addEventListener("click", (e) => {
+        if (e.target === modal) close(null);
+      });
+      modal.querySelector("[data-send]").onclick = async () => {
+        const subject = modal.querySelector("#fb-subject").value;
+        const message = modal.querySelector("#fb-message").value.trim();
+        const statusEl = modal.querySelector("#fb-status");
+        if (!message) {
+          statusEl.textContent = "Le message ne peut pas être vide.";
+          statusEl.style.color = "var(--bad)";
+          return;
+        }
+        statusEl.textContent = "Envoi…";
+        statusEl.style.color = "var(--muted)";
+        try {
+          const session = localStorage.getItem("agri_session");
+          const r = await fetch(`${WORKER_URL.replace(/\/$/, "")}/api/feedback`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...(session ? { authorization: `Bearer ${session}` } : {}),
+            },
+            body: JSON.stringify({
+              subject,
+              message,
+              context: {
+                user_agent: navigator.userAgent,
+                conversation_turns: app.conversation.length,
+                analysis_dominant_crop: app.getAnalysisCombined?.()?.identification?.dominant_crop_fr || null,
+              },
+            }),
+          });
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({}));
+            throw new Error(j.error || `HTTP ${r.status}`);
+          }
+          close({ subject, message });
+        } catch (e) {
+          statusEl.textContent = "Erreur : " + e.message;
+          statusEl.style.color = "var(--bad)";
+        }
+      };
+    });
+  }
 
   // ---------- Rendering ----------
   function renderChat() {
@@ -596,7 +692,7 @@ Mode de conduite : ${bio}`;
       ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze`
       : "https://api.anthropic.com/v1/messages";
     const headers = useWorker
-      ? { "content-type": "application/json", "anthropic-version": "2023-06-01" }
+      ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...shareAttribHeaders() }
       : {
           "content-type": "application/json",
           "x-api-key": ANTHROPIC_API_KEY,
@@ -607,7 +703,10 @@ Mode de conduite : ${bio}`;
     try {
       const r = await fetch(url, { method: "POST", headers, body: payload });
       const j = await r.json();
-      if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+      if (j.error) {
+        if (handleAiAccessError(j)) return;
+        throw new Error(j.message || j.error.message || JSON.stringify(j.error));
+      }
       app.onUsage?.(j.usage, ANTHROPIC_MODEL);
       const rawText = j.content?.[0]?.text || "";
       document.getElementById("raw").textContent = rawText;

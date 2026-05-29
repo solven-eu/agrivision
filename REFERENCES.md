@@ -12,6 +12,11 @@ External documents and resources informing the design and agronomic content of A
 
 ## Data sources used by the app
 
+- **Réunion soil dataset (CIRAD / Nature Sci Data 2026)** — 22.7k soil samples across La Réunion with pH, CEC, N/P/K, organic C, water retention (pF 1.8–4.2), FAO soil classification, historical land use, dated 2008+.
+  Paper: https://www.nature.com/articles/s41597-026-07254-8
+  Dataset: https://dataverse.cirad.fr/file.xhtml?fileId=32543 (`soil_run.csv`, ~3.4 MB, CC-BY).
+  Preprocessing: `scripts/build-soil-data.js` → `worker/data/soil-reunion.json`.
+  Worker endpoint: `GET /api/soil?lat=&lon=&n=5`. Injected into the AI context via `js/prompts.js buildContextBlock` whenever a parcel is selected.
 - **IGN Géoplateforme RPG** — parcel geometries, RPG codes, bio flag.
   https://geoservices.ign.fr/ (WMS + WFS via `data.geopf.fr`)
 - **BAN** — French address geocoding (free, no key).
