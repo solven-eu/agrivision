@@ -17,6 +17,8 @@
 //   GET     /api/soil               → nearest N soil samples + medians (public)
 //   POST    /api/feedback           → store user feedback in KV (optional Bearer for sub)
 //   POST    /api/auth/dropbox/login → verify Dropbox id_token, mint AgriVision session JWT
+//   POST    /api/auth/google/login  → verify Google id_token, mint AgriVision session JWT
+//   POST    /api/auth/facebook/login→ verify FB access_token (Graph debug_token), mint session
 //   POST    /api/auth/refresh        → rotate the session JWT (revokes the presented one)
 //   POST    /api/auth/logout         → revoke the presented session JWT server-side
 //   GET     /api/share/quota        → current user's quota (Bearer required)
@@ -38,9 +40,13 @@
 //                            for our session JWT. Generate: openssl rand -hex 32.
 //   STRIPE_SECRET_KEY       (set via: wrangler secret put STRIPE_SECRET_KEY)
 //   STRIPE_WEBHOOK_SECRET   (set via: wrangler secret put STRIPE_WEBHOOK_SECRET)
+//   FACEBOOK_APP_SECRET     (set via: wrangler secret put FACEBOOK_APP_SECRET) — our app's
+//                            secret, used to verify FB access_tokens. Not a user secret.
 //
 // Optional environment:
 //   ALLOWED_ORIGIN          (defaults to "*"; set to your hosting origin to lock it down)
+//   GOOGLE_CLIENT_ID        (pins the accepted `aud` on Google id_tokens; recommended in prod)
+//   FACEBOOK_APP_ID         (our Facebook app id; required for /api/auth/facebook/login)
 
 const ALLOWED_HEADERS = "content-type,anthropic-version,authorization";
 const MAX_BODY_BYTES = 25 * 1024 * 1024; // 25 MB cap (several large images + context)
@@ -52,11 +58,22 @@ const AGRI_JWT_AUD = "agrivision";
 const AGRI_JWT_ISS = "agrivision";
 const AGRI_JWT_TTL_SECONDS = 7 * 24 * 3600; // 7 days
 
-// Dropbox OpenID Connect endpoints (discovery + fallback JWKS URL).
-const DROPBOX_OIDC = {
-  discovery: "https://www.dropbox.com/.well-known/openid-configuration",
-  // Issuers we accept on the id_token. Dropbox has used both at different times.
-  acceptedIssuers: ["https://www.dropbox.com", "https://api.dropboxapi.com"],
+// OpenID Connect identity providers. Each entry is a pure-OIDC IdP whose id_token is a
+// signed JWT we verify against the provider's JWKS (RS256). `sub` becomes namespaced as
+// `<provider>:<idp_sub>`. Facebook is NOT here — its web login returns an access_token,
+// not an OIDC id_token, so it's verified out-of-band via the Graph debug_token endpoint
+// (see verifyFacebookAccessToken). See ROADMAP "First-party auth (BFF)".
+const OIDC_PROVIDERS = {
+  dropbox: {
+    discovery: "https://www.dropbox.com/.well-known/openid-configuration",
+    // Issuers we accept on the id_token. Dropbox has used both at different times.
+    acceptedIssuers: ["https://www.dropbox.com", "https://api.dropboxapi.com"],
+  },
+  google: {
+    discovery: "https://accounts.google.com/.well-known/openid-configuration",
+    // Google mints the id_token with either form of the issuer.
+    acceptedIssuers: ["https://accounts.google.com", "accounts.google.com"],
+  },
 };
 
 // Per-tier quotas & feature flags are imported from the SHARED config that the SPA also
@@ -482,7 +499,7 @@ export default {
         // Audience check: the SPA passes its Dropbox client_id (DROPBOX_APP_KEY) so the
         // Worker can confirm the id_token was minted for *this* SPA. Skip if not sent
         // (avoids forcing every caller to know the value during the PoC).
-        const claims = await verifyDropboxIdToken(body.id_token, body.client_id || null);
+        const claims = await verifyOidcIdToken(body.id_token, OIDC_PROVIDERS.dropbox, body.client_id || null);
         const sub = `dropbox:${claims.sub}`;
         const session = await mintAgriSession(env, sub, {
           provider: "dropbox",
@@ -491,6 +508,62 @@ export default {
         return json({ agri_session: session.token, exp: session.exp, sub }, 200, origin);
       } catch (e) {
         return json({ error: "id_token verification failed: " + e.message }, 401, origin);
+      }
+    }
+
+    // POST /api/auth/google/login — trade a verified Google id_token for an AgriVision
+    // session JWT. The SPA gets the id_token from Google Identity Services (the `credential`
+    // field of the GIS callback). Pure identity — no storage is connected by this call.
+    if (url.pathname === "/api/auth/google/login" && req.method === "POST") {
+      if (!env.AGRI_JWT_SECRET) return json({ error: "AGRI_JWT_SECRET not configured" }, 503, origin);
+      let body;
+      try {
+        body = await req.json();
+      } catch (e) {
+        return json({ error: "bad body: " + e.message }, 400, origin);
+      }
+      if (!body?.id_token) return json({ error: "id_token required" }, 400, origin);
+      try {
+        // Audience: pin to GOOGLE_CLIENT_ID server-side when configured (prevents a token
+        // minted for a *different* Google OAuth app from being accepted). Fall back to the
+        // client-sent client_id during local dev when the env var isn't set.
+        const expectedAud = env.GOOGLE_CLIENT_ID || body.client_id || null;
+        const claims = await verifyOidcIdToken(body.id_token, OIDC_PROVIDERS.google, expectedAud);
+        const sub = `google:${claims.sub}`;
+        const session = await mintAgriSession(env, sub, {
+          provider: "google",
+          email: claims.email || null,
+        });
+        return json({ agri_session: session.token, exp: session.exp, sub }, 200, origin);
+      } catch (e) {
+        return json({ error: "id_token verification failed: " + e.message }, 401, origin);
+      }
+    }
+
+    // POST /api/auth/facebook/login — trade a verified Facebook access_token for an
+    // AgriVision session JWT. The SPA gets the access_token from the Facebook JS SDK
+    // (FB.login → authResponse.accessToken). Verified server-side via Graph debug_token.
+    if (url.pathname === "/api/auth/facebook/login" && req.method === "POST") {
+      if (!env.AGRI_JWT_SECRET) return json({ error: "AGRI_JWT_SECRET not configured" }, 503, origin);
+      if (!env.FACEBOOK_APP_ID || !env.FACEBOOK_APP_SECRET)
+        return json({ error: "Facebook login not configured" }, 503, origin);
+      let body;
+      try {
+        body = await req.json();
+      } catch (e) {
+        return json({ error: "bad body: " + e.message }, 400, origin);
+      }
+      if (!body?.access_token) return json({ error: "access_token required" }, 400, origin);
+      try {
+        const fb = await verifyFacebookAccessToken(body.access_token, env);
+        const sub = `facebook:${fb.sub}`;
+        const session = await mintAgriSession(env, sub, {
+          provider: "facebook",
+          email: fb.email,
+        });
+        return json({ agri_session: session.token, exp: session.exp, sub }, 200, origin);
+      } catch (e) {
+        return json({ error: "access_token verification failed: " + e.message }, 401, origin);
       }
     }
 
@@ -511,6 +584,22 @@ export default {
     // GET /api/share/quota — current consumption + caps for the user's UI.
     if (url.pathname === "/api/share/quota" && req.method === "GET") {
       return shareQuota(req, env, origin);
+    }
+    // GET /api/share/load — read back the AgriVision-mirrored manifest + photos so a fresh
+    // device (or a user who dropped their own cloud) can restore from our backup.
+    if (url.pathname === "/api/share/load" && req.method === "GET") {
+      return shareLoad(req, env, origin);
+    }
+
+    // POST /api/storage/register — record a non-secret pointer to WHERE the user's data
+    // lives (which cloud + which account), so another device knows where to send them to
+    // restore. No tokens are stored — see CLAUDE.md "never store user secrets".
+    if (url.pathname === "/api/storage/register" && req.method === "POST") {
+      return storageRegister(req, env, origin);
+    }
+    // GET /api/storage/pointer — fetch that pointer for the signed-in identity.
+    if (url.pathname === "/api/storage/pointer" && req.method === "GET") {
+      return storagePointer(req, env, origin);
     }
 
     // GET /api/vigicrues-stations — scrapes the donnees.php menu structure,
@@ -731,9 +820,11 @@ function b64urlDecodeString(s) {
   return new TextDecoder().decode(b64urlDecodeBytes(s));
 }
 
-// ============= Dropbox JWKS — fetched once, edge-cached 24h =============
-async function fetchDropboxJwks() {
-  const dr = await fetch(DROPBOX_OIDC.discovery, {
+// ============= OIDC JWKS — discovered + edge-cached 24h =============
+// Generic over any OIDC provider's discovery document. The CF edge cache keys on the URL,
+// so each provider's JWKS is fetched at most once per 24h per colo.
+async function fetchOidcJwks(discoveryUrl) {
+  const dr = await fetch(discoveryUrl, {
     cf: { cacheTtl: 86400, cacheEverything: true },
   });
   if (!dr.ok) throw new Error("oidc discovery " + dr.status);
@@ -744,16 +835,18 @@ async function fetchDropboxJwks() {
   return { jwks: await jr.json(), issuer: conf.issuer || null };
 }
 
-// ============= Verify a Dropbox id_token (RS256) =============
-// Throws on any failure. Returns the parsed claims on success.
-async function verifyDropboxIdToken(jwt, expectedAudience) {
+// ============= Verify an OIDC id_token (RS256) against a provider's JWKS =============
+// Generic verifier shared by Dropbox + Google. `provider` is an entry from OIDC_PROVIDERS.
+// `expectedAudience` (when non-null) is enforced against the `aud` claim. Throws on any
+// failure; returns the parsed claims on success.
+async function verifyOidcIdToken(jwt, provider, expectedAudience) {
   const parts = String(jwt || "").split(".");
   if (parts.length !== 3) throw new Error("malformed jwt");
   const [headerB64, payloadB64, sigB64] = parts;
   const header = JSON.parse(b64urlDecodeString(headerB64));
   if (header.alg !== "RS256") throw new Error("unexpected alg " + header.alg);
   if (!header.kid) throw new Error("missing kid");
-  const { jwks, issuer: discoveredIssuer } = await fetchDropboxJwks();
+  const { jwks, issuer: discoveredIssuer } = await fetchOidcJwks(provider.discovery);
   const key = (jwks.keys || []).find((k) => k.kid === header.kid);
   if (!key) throw new Error("kid not in jwks");
   const cryptoKey = await crypto.subtle.importKey(
@@ -771,13 +864,53 @@ async function verifyDropboxIdToken(jwt, expectedAudience) {
   const now = Math.floor(Date.now() / 1000);
   if (claims.exp && claims.exp < now) throw new Error("expired");
   if (claims.nbf && claims.nbf > now) throw new Error("not yet valid");
-  const acceptable = new Set(DROPBOX_OIDC.acceptedIssuers);
+  const acceptable = new Set(provider.acceptedIssuers);
   if (discoveredIssuer) acceptable.add(discoveredIssuer);
   if (!acceptable.has(claims.iss)) throw new Error("unexpected issuer: " + claims.iss);
   if (expectedAudience && claims.aud !== expectedAudience)
     throw new Error("unexpected audience: " + claims.aud);
   if (!claims.sub) throw new Error("no sub claim");
   return claims;
+}
+
+// ============= Verify a Facebook access_token via the Graph debug_token endpoint =============
+// Facebook web login yields an access_token (opaque), not an OIDC id_token. We confirm it
+// server-side with our own app credentials: debug_token validates the token was minted for
+// OUR app and is unexpired; then /me reads the stable user id + email. The app secret is
+// OURS (not the user's), so this respects the CLAUDE.md "no user secrets" rule.
+// Returns { sub, email, name }. Throws on any failure.
+async function verifyFacebookAccessToken(accessToken, env) {
+  if (!env.FACEBOOK_APP_ID || !env.FACEBOOK_APP_SECRET)
+    throw new Error("FACEBOOK_APP_ID/SECRET not configured");
+  if (!accessToken) throw new Error("access_token required");
+  const appToken = `${env.FACEBOOK_APP_ID}|${env.FACEBOOK_APP_SECRET}`;
+  const dbgUrl =
+    `https://graph.facebook.com/debug_token?input_token=${encodeURIComponent(accessToken)}` +
+    `&access_token=${encodeURIComponent(appToken)}`;
+  const dr = await fetch(dbgUrl);
+  if (!dr.ok) throw new Error("debug_token http " + dr.status);
+  const dj = await dr.json();
+  const data = dj.data || {};
+  if (!data.is_valid) throw new Error("token not valid");
+  if (String(data.app_id) !== String(env.FACEBOOK_APP_ID))
+    throw new Error("token minted for a different app");
+  if (!data.user_id) throw new Error("no user_id on token");
+  const now = Math.floor(Date.now() / 1000);
+  if (data.expires_at && data.expires_at < now) throw new Error("token expired");
+  // Pull the email + name with the user's own token (debug_token doesn't return them).
+  let email = null,
+    name = null;
+  try {
+    const mr = await fetch(
+      `https://graph.facebook.com/me?fields=id,email,name&access_token=${encodeURIComponent(accessToken)}`
+    );
+    if (mr.ok) {
+      const mj = await mr.json();
+      email = mj.email || null;
+      name = mj.name || null;
+    }
+  } catch {}
+  return { sub: String(data.user_id), email, name };
 }
 
 // ============= AgriVision session JWT (HS256) — mint + verify =============
@@ -1014,6 +1147,121 @@ async function shareDelete(req, env, origin) {
   } while (cursor);
   // Note: this loop above already wiped quota.json — counters effectively reset.
   return json({ ok: true, deleted }, 200, origin);
+}
+
+// ============================================================================
+// Storage pointer — a NON-SECRET record of where a user's data lives, kept as
+// metadata of the AgriVision storage at share/<sub>/storage.json:
+//   { preferred: "dropbox", providers: { dropbox: { account_id, email_masked,
+//     root_path, last_seen } }, updated_at }
+// Lets any device (after the user logs in with the same identity) say "your data
+// is in Dropbox (b•••@x.com) — reconnect to restore", and tells us where to send
+// the user for OneDrive etc. later. We NEVER store the access/refresh token here.
+// ============================================================================
+async function storageRegister(req, env, origin) {
+  if (!env.SHARE_KV) return json({ error: "SHARE_KV binding not configured" }, 503, origin);
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  let body;
+  try {
+    body = await req.json();
+  } catch (e) {
+    return json({ error: "invalid json body: " + e.message }, 400, origin);
+  }
+  const provider = String(body?.provider || "").toLowerCase();
+  if (!["dropbox", "onedrive", "gdrive"].includes(provider))
+    return json({ error: "unsupported provider" }, 400, origin);
+  if (!body?.account_id) return json({ error: "account_id required" }, 400, origin);
+
+  const key = `share/${who.accountId}/storage.json`;
+  let pointer = { preferred: null, providers: {}, updated_at: null };
+  try {
+    const raw = await env.SHARE_KV.get(key);
+    if (raw) pointer = JSON.parse(raw);
+  } catch {}
+  pointer.providers = pointer.providers || {};
+  pointer.providers[provider] = {
+    account_id: String(body.account_id).slice(0, 200),
+    // The client masks the email before sending; we defensively cap length and never
+    // expect a full address here.
+    email_masked: body.email_masked ? String(body.email_masked).slice(0, 120) : null,
+    root_path: body.root_path ? String(body.root_path).slice(0, 200) : null,
+    last_seen: new Date().toISOString(),
+  };
+  // First provider registered becomes the preferred one; user's own cloud is preferred
+  // over the AgriVision mirror by construction (the mirror isn't a "provider" entry).
+  if (!pointer.preferred) pointer.preferred = provider;
+  pointer.updated_at = new Date().toISOString();
+  await env.SHARE_KV.put(key, JSON.stringify(pointer));
+  return json({ ok: true, pointer }, 200, origin);
+}
+
+async function storagePointer(req, env, origin) {
+  if (!env.SHARE_KV) return json({ error: "SHARE_KV binding not configured" }, 503, origin);
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  let pointer = null;
+  try {
+    const raw = await env.SHARE_KV.get(`share/${who.accountId}/storage.json`);
+    if (raw) pointer = JSON.parse(raw);
+  } catch {}
+  // has_mirror: does an AgriVision-side backup exist for this identity?
+  const lastSync = await env.SHARE_KV.get(`share/${who.accountId}/last_sync.json`);
+  return json({ pointer, has_mirror: !!lastSync }, 200, origin);
+}
+
+// GET /api/share/load[?culture_id=…] — return a mirrored culture's manifest + its photos so
+// the SPA can rehydrate from our backup. Without culture_id, picks the most recent culture
+// (from last_sync.json, falling back to the first listed).
+async function shareLoad(req, env, origin) {
+  if (!env.SHARE_KV) return json({ error: "SHARE_KV binding not configured" }, 503, origin);
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  const url = new URL(req.url);
+  let cultureId = url.searchParams.get("culture_id");
+
+  // Enumerate mirrored cultures (manifest keys end in /culture.json).
+  const culturesPrefix = `share/${who.accountId}/cultures/`;
+  const cultures = [];
+  let cursor;
+  do {
+    const list = await env.SHARE_KV.list({ prefix: culturesPrefix, cursor });
+    for (const k of list.keys) {
+      const m = k.name.match(/cultures\/([^/]+)\/culture\.json$/);
+      if (m) cultures.push(m[1]);
+    }
+    cursor = list.list_complete ? null : list.cursor;
+  } while (cursor);
+
+  if (!cultureId) {
+    try {
+      const ls = await env.SHARE_KV.get(`share/${who.accountId}/last_sync.json`);
+      if (ls) cultureId = JSON.parse(ls).culture_id || null;
+    } catch {}
+    if (!cultureId) cultureId = cultures[0] || null;
+  }
+  if (!cultureId) return json({ error: "no_mirror", cultures: [] }, 404, origin);
+
+  const base = `share/${who.accountId}/cultures/${cultureId}`;
+  const manifestRaw = await env.SHARE_KV.get(`${base}/culture.json`);
+  if (!manifestRaw) return json({ error: "culture_not_found", cultures }, 404, origin);
+  const manifest = JSON.parse(manifestRaw);
+
+  // Pull photo bytes. Photos are stored keyed by their id; match by manifest order.
+  const photos = [];
+  const photosPrefix = `${base}/photos/`;
+  cursor = undefined;
+  do {
+    const list = await env.SHARE_KV.list({ prefix: photosPrefix, cursor });
+    for (const k of list.keys) {
+      const id = k.name.slice(photosPrefix.length);
+      const b64 = await env.SHARE_KV.get(k.name);
+      if (b64) photos.push({ id, mime: k.metadata?.mime || "image/jpeg", b64 });
+    }
+    cursor = list.list_complete ? null : list.cursor;
+  } while (cursor);
+
+  return json({ culture_id: cultureId, crop_code: manifest.crop_code || null, manifest, photos, cultures }, 200, origin);
 }
 
 // ============================================================================

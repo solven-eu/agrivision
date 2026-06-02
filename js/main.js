@@ -663,11 +663,9 @@ function showTutorial() {
   const modal = document.getElementById("tutorial-modal");
   if (!modal) return;
   let page = 1;
-  const pages = [
-    document.getElementById("tuto-page-1"),
-    document.getElementById("tuto-page-2"),
-    document.getElementById("tuto-page-3"),
-  ];
+  // Pages are discovered from the DOM so adding/removing a .tuto-page slide needs no JS edit.
+  const pages = Array.from(modal.querySelectorAll(".tuto-page"));
+  const total = pages.length;
   const dots = document.getElementById("tuto-dots");
   const prev = document.getElementById("tuto-prev");
   const next = document.getElementById("tuto-next");
@@ -675,15 +673,18 @@ function showTutorial() {
   function render() {
     pages.forEach((el, i) => el && (el.style.display = i === page - 1 ? "block" : "none"));
     if (dots) {
-      dots.innerHTML = [1, 2, 3]
+      dots.innerHTML = pages
         .map(
-          (n) =>
-            `<span style="width:8px;height:8px;border-radius:50%;background:${n === page ? "var(--accent)" : "var(--border)"}"></span>`
+          (_, i) =>
+            `<span style="width:8px;height:8px;border-radius:50%;background:${i + 1 === page ? "var(--accent)" : "var(--border)"}"></span>`
         )
         .join("");
     }
     if (prev) prev.style.visibility = page > 1 ? "visible" : "hidden";
-    if (next) next.textContent = page === 3 ? "Commencer ✓" : "Suivant →";
+    if (next) next.textContent = page === total ? "Commencer ✓" : "Suivant →";
+    // When the login slide becomes visible, (re)mount the provider buttons — Google's button
+    // needs a visible, sized container, which it only has once this page is shown.
+    if (pages[page - 1]?.id === "tuto-page-login") window.auth?.render();
   }
   function close() {
     modal.style.display = "none";
@@ -696,7 +697,7 @@ function showTutorial() {
     }
   });
   next?.addEventListener("click", () => {
-    if (page < 3) {
+    if (page < total) {
       page++;
       render();
     } else {
@@ -784,6 +785,18 @@ const share = createShare({
 });
 window.share = share; // expose for debugging
 
+// ============ Login UI (identity providers: Google / Facebook / Dropbox) ============
+import { createAuth } from "./auth.js";
+const auth = createAuth();
+auth.render();
+window.auth = auth; // expose for debugging
+// Sharing depends on identity — when login state changes, refresh the share panel/quota.
+window.addEventListener("agrivision:login", () => {
+  share.render();
+  share.fetchQuota();
+});
+window.addEventListener("agrivision:logout", () => share.render());
+
 // ============ Dropbox persistence (extracted) ============
 import { createDbx } from "./persistence.js";
 const DBX = createDbx({
@@ -838,6 +851,9 @@ const DBX = createDbx({
     pendingDbxLoad = v;
   },
 });
+// The login panel / tutorial offer "Continuer avec Dropbox"; route that to the OAuth flow.
+window.addEventListener("agrivision:connect-dropbox", () => DBX.connect());
+window.DBX = DBX; // expose so the login panel's "Restaurer depuis AgriVision" can reach it
 
 // ===== Wire save triggers on every data change =====
 const _origPlace = placePhotoMarker; // ensure marker re-renders don't loop

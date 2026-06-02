@@ -67,19 +67,22 @@ export async function logoutSession() {
   localStorage.removeItem("agri_session");
   localStorage.removeItem("agri_session_exp");
   localStorage.removeItem("agri_sub");
+  window.dispatchEvent(new CustomEvent("agrivision:logout"));
 }
 
-// Exchange a Dropbox id_token for an AgriVision session JWT. Called once after the
-// Dropbox OAuth code exchange (from persistence.js). Stores the session under
-// `agri_session` in localStorage. Idempotent — if a fresh session already exists,
-// the new one simply overwrites it.
-export async function tradeDropboxIdTokenForSession(idToken, dropboxClientId) {
-  if (!WORKER_URL || !idToken) return null;
+// POST a proof (IdP id_token or access_token) to one of our /api/auth/<provider>/login
+// endpoints and persist the returned AgriVision session JWT under `agri_session`.
+// Shared by every identity provider. Idempotent — a fresh session simply overwrites the
+// previous one (switching providers re-identifies the browser). Returns the session token
+// on success, null otherwise. `window` gets an `agrivision:login` event so the login UI
+// (and any listener) can re-render without polling.
+async function tradeForSession(path, payload) {
+  if (!WORKER_URL) return null;
   try {
-    const r = await fetch(`${WORKER_URL.replace(/\/$/, "")}/api/auth/dropbox/login`, {
+    const r = await fetch(`${WORKER_URL.replace(/\/$/, "")}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id_token: idToken, client_id: dropboxClientId || null }),
+      body: JSON.stringify(payload),
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.agri_session) {
@@ -89,9 +92,97 @@ export async function tradeDropboxIdTokenForSession(idToken, dropboxClientId) {
     localStorage.setItem("agri_session", j.agri_session);
     if (j.exp) localStorage.setItem("agri_session_exp", String(j.exp));
     if (j.sub) localStorage.setItem("agri_sub", j.sub);
+    window.dispatchEvent(new CustomEvent("agrivision:login", { detail: { sub: j.sub || null } }));
     return j.agri_session;
   } catch (e) {
     console.warn("agri session mint error:", e.message);
+    return null;
+  }
+}
+
+// Exchange a Dropbox id_token for an AgriVision session JWT. Called once after the
+// Dropbox OAuth code exchange (from persistence.js).
+export async function tradeDropboxIdTokenForSession(idToken, dropboxClientId) {
+  if (!idToken) return null;
+  return tradeForSession("/api/auth/dropbox/login", {
+    id_token: idToken,
+    client_id: dropboxClientId || null,
+  });
+}
+
+// Exchange a Google id_token (the `credential` from Google Identity Services) for a session.
+export async function tradeGoogleIdTokenForSession(idToken, googleClientId) {
+  if (!idToken) return null;
+  return tradeForSession("/api/auth/google/login", {
+    id_token: idToken,
+    client_id: googleClientId || null,
+  });
+}
+
+// Exchange a Facebook access_token (from FB.login) for a session.
+export async function tradeFacebookTokenForSession(accessToken) {
+  if (!accessToken) return null;
+  return tradeForSession("/api/auth/facebook/login", { access_token: accessToken });
+}
+
+// Mask an email for the storage-pointer hint: keep the first char + domain, e.g.
+// "benoit@solven.eu" → "b•••@solven.eu". Done client-side so the full address never
+// reaches our backend — we only ever store the masked form + the opaque account id.
+export function maskEmail(email) {
+  if (!email || typeof email !== "string" || !email.includes("@")) return null;
+  const [local, domain] = email.split("@");
+  const head = local.slice(0, 1) || "";
+  return `${head}•••@${domain}`;
+}
+
+// Register a NON-SECRET pointer to where the user's data lives (which cloud + which
+// account), keyed server-side by the signed-in identity. No token is ever sent. Best-effort.
+export async function registerStoragePointer({ provider, account_id, email, root_path }) {
+  if (!WORKER_URL || !account_id) return;
+  const headers = { "content-type": "application/json", ...workerAuthHeader() };
+  if (!headers.authorization) return; // needs an AgriVision session to attribute the pointer
+  try {
+    await fetch(`${WORKER_URL.replace(/\/$/, "")}/api/storage/register`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        provider,
+        account_id,
+        email_masked: maskEmail(email),
+        root_path: root_path || null,
+      }),
+    });
+  } catch (e) {
+    console.warn("storage pointer register failed:", e.message);
+  }
+}
+
+// Fetch the storage pointer for the signed-in identity → { pointer, has_mirror } or null.
+export async function fetchStoragePointer() {
+  if (!WORKER_URL) return null;
+  const headers = workerAuthHeader();
+  if (!headers.authorization) return null;
+  try {
+    const r = await fetch(`${WORKER_URL.replace(/\/$/, "")}/api/storage/pointer`, { headers });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+// Load the AgriVision-mirrored manifest + photos for restore → { culture_id, crop_code,
+// manifest, photos:[{id,mime,b64}], cultures:[] } or null.
+export async function loadFromAgriVision(cultureId) {
+  if (!WORKER_URL) return null;
+  const headers = workerAuthHeader();
+  if (!headers.authorization) return null;
+  const qs = cultureId ? `?culture_id=${encodeURIComponent(cultureId)}` : "";
+  try {
+    const r = await fetch(`${WORKER_URL.replace(/\/$/, "")}/api/share/load${qs}`, { headers });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch {
     return null;
   }
 }

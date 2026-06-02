@@ -2,9 +2,17 @@ name = "agrivision-api"
 main = "worker.js"
 compatibility_date = "2025-01-01"
 
-# To lock down CORS to a specific origin (replace * with your hosting URL):
-# [vars]
-# ALLOWED_ORIGIN = "https://agrivision.example.com"
+# Non-secret environment. Social login: GOOGLE_CLIENT_ID pins the accepted `aud` on Google
+# id_tokens at /api/auth/google/login (must match GOOGLE_CLIENT_ID in js/config.js).
+[vars]
+# ALLOWED_ORIGIN = "https://agrivision.example.com"   # default "*"
+GOOGLE_CLIENT_ID = "634422093981-od2rmhdjqaiof1uhb3glj6oi0e6lrkcu.apps.googleusercontent.com"
+FACEBOOK_APP_ID = "26899197766369996"   # must match FACEBOOK_APP_ID in js/config.js
+
+# Facebook login secret (OUR app secret — not a user secret, so allowed under CLAUDE.md):
+#   wrangler secret put FACEBOOK_APP_SECRET
+# Required together with FACEBOOK_APP_ID for /api/auth/facebook/login; without it the
+# endpoint returns 503. From https://developers.facebook.com/apps → Settings → Basic.
 
 # AgriVision session JWT secret. Used to sign HS256 session tokens minted at
 # /api/auth/dropbox/login. Generate with: openssl rand -hex 32
@@ -24,10 +32,11 @@ compatibility_date = "2025-01-01"
 # https://<your-worker>.workers.dev/api/billing/webhook with these events:
 # customer.subscription.created/updated/deleted, invoice.payment_failed).
 
-# KV namespace for the opt-in "Share with AgriVision" feature.
-# Create one with:   wrangler kv namespace create SHARE_KV
-# Then replace <ID> below with the printed id (and re-deploy).
-# Leaving this commented disables the share endpoints (they 503 cleanly).
-# [[kv_namespaces]]
-# binding = "SHARE_KV"
-# id = "<ID>"
+# KV namespace for "Share with AgriVision" + storage pointers + backup restore.
+# For local `wrangler dev` the id below is a placeholder (local mode simulates KV).
+# BEFORE DEPLOY: create a real namespace and replace the id:
+#   wrangler kv namespace create SHARE_KV   # prints the production id
+# (and ideally `wrangler kv namespace create SHARE_KV --preview` for `wrangler dev --remote`).
+[[kv_namespaces]]
+binding = "SHARE_KV"
+id = "local_placeholder_replace_before_deploy"

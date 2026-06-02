@@ -5,7 +5,12 @@
 // portable: it doesn't reach into main.js's scope; main.js explicitly wires the dependencies.
 
 import { DROPBOX_APP_KEY, DROPBOX_REDIRECT_URI } from "./config.js";
-import { tradeDropboxIdTokenForSession, logoutSession } from "./share.js";
+import {
+  tradeDropboxIdTokenForSession,
+  logoutSession,
+  registerStoragePointer,
+  loadFromAgriVision,
+} from "./share.js";
 import { ensureSoilForSelected } from "./soil.js";
 import { ensureAltitudeForSelected } from "./elevation.js";
 
@@ -178,11 +183,41 @@ export function createDbx(app) {
     // AgriVision session (`agri_session` in localStorage) for all backend calls.
     if (j.id_token) {
       localStorage.setItem("dbx_id_token", j.id_token);
+      // Identity vs storage are decoupled. If the user is ALREADY signed in (e.g. via
+      // Google), connecting Dropbox is a STORAGE action — keep their existing identity and
+      // just record where the data lives. Only when there's no session does Dropbox double
+      // as the identity provider (trade the id_token for an AgriVision session).
+      const haveSession = !!localStorage.getItem("agri_session");
+      const ready = haveSession
+        ? Promise.resolve()
+        : tradeDropboxIdTokenForSession(j.id_token, DROPBOX_APP_KEY);
       // Fire-and-forget — if the Worker is unreachable / not configured, share calls just
-      // stay anonymous. The user sees the error in the share panel.
-      tradeDropboxIdTokenForSession(j.id_token, DROPBOX_APP_KEY).catch(() => {});
+      // stay anonymous. Register the storage pointer once a session exists.
+      ready.then(() => registerDropboxPointer()).catch(() => {});
     }
     sessionStorage.removeItem(LS.verifier);
+  }
+
+  // Record a non-secret pointer (which Dropbox account holds this user's data) so other
+  // devices know where to send the user to restore. Reads the account from Dropbox; the
+  // access token never leaves the browser. Best-effort.
+  async function registerDropboxPointer() {
+    if (!state.token) return;
+    try {
+      const r = await dbxFetch("https://api.dropboxapi.com/2/users/get_current_account", {
+        method: "POST",
+      });
+      if (!r.ok) return;
+      const acct = await r.json();
+      await registerStoragePointer({
+        provider: "dropbox",
+        account_id: acct.account_id,
+        email: acct.email || null,
+        root_path: "/Apps/AgriVision",
+      });
+    } catch (e) {
+      console.warn("dropbox pointer register failed:", e.message);
+    }
   }
 
   async function refreshToken() {
@@ -202,8 +237,11 @@ export function createDbx(app) {
     localStorage.setItem(LS.token, state.token);
     if (j.id_token) {
       localStorage.setItem("dbx_id_token", j.id_token);
-      // Refresh our session too — keeps the user signed in across sliding windows.
-      tradeDropboxIdTokenForSession(j.id_token, DROPBOX_APP_KEY).catch(() => {});
+      // Only (re)mint a Dropbox-backed session if Dropbox is the identity (no other session
+      // present). A Google/Facebook session is refreshed separately via maybeRefreshSession.
+      if (!localStorage.getItem("agri_session")) {
+        tradeDropboxIdTokenForSession(j.id_token, DROPBOX_APP_KEY).catch(() => {});
+      }
     }
     return true;
   }
@@ -433,13 +471,36 @@ export function createDbx(app) {
     document.getElementById("loading-overlay").classList.remove("show");
   }
 
-  async function loadSession(cropCode, sid) {
+  // Rehydrate a culture into the running app. Source-agnostic: by default it downloads the
+  // manifest + photos from Dropbox, but `opts.manifest` + `opts.getPhotoData` let the
+  // AgriVision-backup restore feed an already-loaded manifest and inline photo bytes — so
+  // the same rehydration runs whether the data comes from the user's cloud or our mirror.
+  async function loadSession(cropCode, sid, opts = {}) {
     state.suspendSave = true;
     setSaveStatus("loading");
-    showLoading(`Chargement du manifeste…`, 0);
+    showLoading(opts.manifest ? "Restauration…" : `Chargement du manifeste…`, 0);
     try {
-      const r = await downloadFile(`/crops/${cropCode}/cultures/${sid}/culture.json`);
-      const manifest = await r.json();
+      let manifest = opts.manifest;
+      if (!manifest) {
+        const r = await downloadFile(`/crops/${cropCode}/cultures/${sid}/culture.json`);
+        manifest = await r.json();
+      }
+      // Resolve each photo's bytes. Default = Dropbox download; restore passes its own getter.
+      const getPhotoData =
+        opts.getPhotoData ||
+        (async (photo) => {
+          const pr = await downloadFile(
+            `/crops/${cropCode}/cultures/${sid}${photo._file.startsWith("/") ? photo._file : "/" + photo._file}`
+          );
+          const blob = await pr.blob();
+          const dataUrl = await new Promise((res, rej) => {
+            const rd = new FileReader();
+            rd.onload = () => res(rd.result);
+            rd.onerror = rej;
+            rd.readAsDataURL(blob);
+          });
+          return { b64: dataUrl.split(",")[1], dataUrl };
+        });
 
       // Clear current state
       app.photos.forEach((p) => {
@@ -530,18 +591,9 @@ export function createDbx(app) {
         for (const photo of app.photos) {
           if (!photo._file) continue;
           try {
-            const pr = await downloadFile(
-              `/crops/${cropCode}/cultures/${sid}${photo._file.startsWith("/") ? photo._file : "/" + photo._file}`
-            );
-            const blob = await pr.blob();
-            const dataUrl = await new Promise((res, rej) => {
-              const rd = new FileReader();
-              rd.onload = () => res(rd.result);
-              rd.onerror = rej;
-              rd.readAsDataURL(blob);
-            });
-            photo.b64 = dataUrl.split(",")[1];
-            photo.dataUrl = dataUrl;
+            const data = await getPhotoData(photo);
+            photo.b64 = data.b64;
+            photo.dataUrl = data.dataUrl;
             photo.loading = false;
             state.uploaded[photo.id] = { name: photo.name, mime: photo.mime };
             if (photo.lat != null) app.placePhotoMarker(photo);
@@ -623,6 +675,28 @@ export function createDbx(app) {
       }, 3000);
       hideLoading();
     }
+  }
+
+  // Restore from the AgriVision backup (the opt-in KV mirror), keyed by the signed-in
+  // identity — used on a fresh device, or when the user can't / won't reconnect their own
+  // cloud. Photos arrive inline (base64) in the payload, so no storage provider is needed.
+  // Returns true if a backup was found and applied.
+  async function restoreFromAgriVision(cultureId) {
+    const data = await loadFromAgriVision(cultureId);
+    if (!data?.manifest) {
+      renderPanel("Aucune sauvegarde AgriVision trouvée.");
+      return false;
+    }
+    const byId = new Map((data.photos || []).map((p) => [p.id, p]));
+    const getPhotoData = async (photo) => {
+      const p = byId.get(photo.id);
+      if (!p) throw new Error("photo absente de la sauvegarde");
+      return { b64: p.b64, dataUrl: `data:${p.mime || "image/jpeg"};base64,${p.b64}` };
+    };
+    const cropCode = data.crop_code || data.manifest.crop_code || "UNK";
+    const sid = data.culture_id || data.manifest.culture_id;
+    await loadSession(cropCode, sid, { manifest: data.manifest, getPhotoData });
+    return true;
   }
 
   // ===== Auto-reload latest culture on startup =====
@@ -853,5 +927,14 @@ export function createDbx(app) {
     }
   }
   renderPanel();
-  return { schedule, setAnalysis, autoReloadLatest, listSessions };
+  // `connect` exposes the Dropbox OAuth flow so other UI (the login panel / tutorial) can
+  // start it without owning the dbx-panel button.
+  return {
+    schedule,
+    setAnalysis,
+    autoReloadLatest,
+    listSessions,
+    connect: startAuth,
+    restoreFromAgriVision,
+  };
 }
