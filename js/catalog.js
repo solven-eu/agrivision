@@ -62,16 +62,19 @@ export function resolveIdentifiedCropMeta(identification) {
   const sci = (id.scientific_name || "").trim().toLowerCase();
   const fr = (id.dominant_crop_fr || "").trim().toLowerCase();
   if (!sci && !fr) return null;
-  for (const meta of Object.values(CROP_CATALOG)) {
-    if (sci && meta.scientific?.toLowerCase() === sci) return meta;
-    if (fr && meta.fr?.toLowerCase() === fr) return meta;
+  // Iterate ENTRIES so the catalog key (RPG code_cultu) is attached to the returned
+  // meta — downstream consumers (parcels.js soil scoring, etc.) need it to gate on
+  // "is this a recognized crop?" and look up CULTU_LABELS / SUITABILITY by code.
+  for (const [code, meta] of Object.entries(CROP_CATALOG)) {
+    if (sci && meta.scientific?.toLowerCase() === sci) return { ...meta, code_cultu: code };
+    if (fr && meta.fr?.toLowerCase() === fr) return { ...meta, code_cultu: code };
   }
   const sciGenus = sci.split(/\s+/)[0];
-  for (const meta of Object.values(CROP_CATALOG)) {
+  for (const [code, meta] of Object.entries(CROP_CATALOG)) {
     const mFr = meta.fr?.toLowerCase() || "";
     const mSci = meta.scientific?.toLowerCase() || "";
-    if (fr && (mFr.includes(fr) || fr.includes(mFr))) return meta;
-    if (sciGenus && mSci.startsWith(sciGenus)) return meta;
+    if (fr && (mFr.includes(fr) || fr.includes(mFr))) return { ...meta, code_cultu: code };
+    if (sciGenus && mSci.startsWith(sciGenus)) return { ...meta, code_cultu: code };
   }
   return null;
 }

@@ -231,7 +231,15 @@ const {
   renderParcelInfoPanel,
   updateSelectHint,
   updateLockHint,
+  refreshPhotoAssociations,
 } = parcels;
+// Helper for any place that adds/moves a photo: recompute parcel association + re-render.
+function onPhotosChanged() {
+  refreshPhotoAssociations?.();
+  renderPhotos();
+  renderParcelInfoPanel(); // 📷 N badge updates on the parcel row
+}
+window.__onPhotosChanged = onPhotosChanged;
 
 // ============ Photos with map locations ============
 const photoEl = document.getElementById("photo");
@@ -294,7 +302,7 @@ async function handlePhotoFiles(files) {
   if (files.length === 0) return;
   aStatus.textContent = `Préparation de ${files.length} photo(s)…`;
   for (const f of files) await addPhotoFromFile(f);
-  renderPhotos();
+  onPhotosChanged(); // recompute parcel association + refresh both panels
   analyzeBtn.disabled = photos.length === 0;
   const compressed = photos.filter((p) => p.recompressed).length;
   aStatus.textContent = `${photos.length} photo(s) prête(s)${compressed ? ` (${compressed} recompressée(s))` : ""}.`;
@@ -801,6 +809,12 @@ const DBX = createDbx({
   renderParcelInfoPanel,
   updateLockHint,
   updateAnalyzeAvailability,
+  // Lock setter so persistence can auto-lock parcels right after a restore — pure UI
+  // safety to prevent the user from accidentally adding/removing parcels by tapping the
+  // map. Doesn't affect business logic.
+  setParcelsLocked: (v) => {
+    parcelsLocked = v;
+  },
   // Opt-in share-with-AgriVision hook: invoked by persistence.js after a confirmed save.
   onShareSync: (manifest) => share.syncNow(manifest),
   // Accessors for reassigned scalars:
@@ -871,6 +885,33 @@ const _eventsAppCtx = {
 };
 const events = createEvents(_eventsAppCtx);
 const vigicrues = createVigicruesWidget(_eventsAppCtx);
+
+// Static local climatology card. Renders on demand using the best available reference
+// point: first selected parcel centroid → geocoded address → map center. No network.
+import { renderClimateCard } from "./seasonal-normals.js";
+function _refreshClimateCard() {
+  let lat = null,
+    lon = null,
+    altM = null;
+  if (selectedParcels.size > 0) {
+    const first = selectedParcels.values().next().value;
+    if (first?.latlng) {
+      [lat, lon] = first.latlng;
+      altM = first.altitude ?? null;
+    }
+  } else if (currentAddress?.lat != null) {
+    lat = currentAddress.lat;
+    lon = currentAddress.lon;
+  } else {
+    const c = map.getCenter();
+    lat = c.lat;
+    lon = c.lng;
+  }
+  renderClimateCard("climate-card", lat, lon, altM);
+}
+document
+  .getElementById("climate-section")
+  ?.addEventListener("toggle", (e) => e.target.open && _refreshClimateCard());
 document.getElementById("events-refresh")?.addEventListener("click", () => {
   events.refresh();
   vigicrues.render();

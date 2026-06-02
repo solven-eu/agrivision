@@ -29,6 +29,11 @@ export const DROPBOX_APP_KEY = "rimf9kjv2vhki4j";
 export const DROPBOX_REDIRECT_URI = "";
 
 // === Stripe (billing) ===
+// Dashboard (test mode): https://dashboard.stripe.com/acct_1TcLMIJAQgzNO5f0/test/dashboard
+// Products / prices:     https://dashboard.stripe.com/acct_1TcLMIJAQgzNO5f0/test/products
+// Webhooks:              https://dashboard.stripe.com/acct_1TcLMIJAQgzNO5f0/test/webhooks
+// API keys:              https://dashboard.stripe.com/acct_1TcLMIJAQgzNO5f0/test/apikeys
+//
 // Test mode publishable key — only initiates Checkout sessions, cannot charge or refund.
 // Safe to commit. Live key (`pk_live_...`) replaces this only once we go to production.
 // Secret key (`sk_test_...` / `sk_live_...`) is set on the Worker via

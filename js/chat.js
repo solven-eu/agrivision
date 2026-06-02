@@ -405,11 +405,9 @@ export function createChat(app) {
   function renderChat() {
     const log = document.getElementById("chat-log");
     const actEl = document.getElementById("chat-actions");
-    // Auto-open the chat folding when there are messages or pending actions.
-    if (app.conversation.length > 0) {
-      const sec = document.getElementById("chat-section");
-      if (sec && !sec.open) sec.open = true;
-    }
+    // Note: don't auto-open the chat section from this function — it's also called
+    // during Dropbox restore (which would force-open every page load). The auto-open
+    // is now done from sendTurn (user-initiated) so reloads keep everything folded.
     log.innerHTML = "";
     for (const m of app.conversation) {
       const div = document.createElement("div");
@@ -559,6 +557,10 @@ export function createChat(app) {
       return;
     }
     if (chatBusy) return;
+    // User-initiated turn → open the chat section so the user sees the result. NOT
+    // called from renderChat, so Dropbox restore doesn't pop the section every reload.
+    const sec = document.getElementById("chat-section");
+    if (sec && !sec.open) sec.open = true;
     if (app.isOverHardLimit?.()) {
       app.aStatus.textContent = "⛔ Limite de tokens atteinte — Recommencer pour continuer.";
       return;

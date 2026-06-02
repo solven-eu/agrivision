@@ -50,11 +50,8 @@ export function installMapClickRouter(app) {
       return;
     }
 
-    // Parcel toggle (unless locked or too zoomed out)
-    if (app.getParcelsLocked()) {
-      app.flashLockHint();
-      return;
-    }
+    // Parcel toggle. When locked, parcels.js handles the click as a focus toggle on the
+    // existing selection (doesn't add/remove). Zoom-too-low still short-circuits.
     if (app.map.getZoom() < 12) {
       app.showZoomTooLowMessage();
       return;

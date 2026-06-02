@@ -1,7 +1,22 @@
 // AgriVision service worker — cache-first for app shell + same-origin assets.
 // Bump CACHE_VERSION on app updates.
-const CACHE_VERSION = "agriv-v1";
-const APP_SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg"];
+const CACHE_VERSION = "agriv-v2";
+const APP_SHELL = [
+  "./",
+  "./index.html",
+  "./styles.css",
+  "./manifest.webmanifest",
+  "./icon.svg",
+  "./favicon.ico",
+  "./favicon-32.png",
+  "./favicon-16.png",
+  "./apple-touch-icon.png",
+  "./icon-192.png",
+  "./icon-512.png",
+  "./icon-192-maskable.png",
+  "./icon-512-maskable.png",
+  "./logo-chip.png",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_VERSION).then((c) => c.addAll(APP_SHELL)));

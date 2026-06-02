@@ -7,6 +7,10 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="icon" href="favicon-16.png" sizes="16x16" type="image/png" />
+    <link rel="icon" href="favicon.ico" sizes="48x48" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
     <meta name="theme-color" content="#4ade80" />
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -115,7 +119,13 @@
       <aside id="side">
         <div id="drawer-handle"><span id="drawer-title">Outils</span><span id="drawer-chevron">▲</span></div>
         <h1 style="position: relative">
-          AgriVision RE <span title="La Réunion">🇷🇪</span>
+          <img
+            src="logo-chip.png"
+            alt=""
+            width="26"
+            height="26"
+            style="vertical-align: -6px; margin-right: 8px; border-radius: 6px"
+          />AgriVision RE <span title="La Réunion">🇷🇪</span>
           <span
             id="ver"
             style="
@@ -155,7 +165,9 @@
             position: absolute;
             top: 38px;
             right: 12px;
-            z-index: 999;
+            /* Above Leaflet controls (default ~1000) so the cadastre layer-control and the
+               sun/moon compass don't poke through the user preferences panel. */
+            z-index: 1100;
             background: var(--panel);
             border: 1px solid var(--border);
             border-radius: 6px;
@@ -348,7 +360,15 @@
           </details>
           <div class="small" style="margin-top: 6px">Cliquer une parcelle sur la carte pour ses infos.</div>
         </details>
-        <div id="parcel-info"></div>
+        <details class="advanced" id="parcels-section">
+          <summary>🌾 <span id="parcels-summary-label">Parcelles sélectionnées</span></summary>
+          <div id="parcel-info"></div>
+        </details>
+
+        <details class="advanced" id="climate-section">
+          <summary>🗓️ Climatologie locale</summary>
+          <div id="climate-card" style="margin-top: 6px"></div>
+        </details>
 
         <details class="advanced" id="events-section">
           <summary>📰 Événements<span id="events-count"></span></summary>
@@ -376,7 +396,7 @@
           ></div>
         </details>
 
-        <details class="advanced" id="photos-section" open>
+        <details class="advanced" id="photos-section">
           <summary>📷 <span id="photos-summary-count">Photos de la culture</span></summary>
           <div class="small" style="margin-top: 6px">
             Plusieurs photos = meilleure analyse (vue large + gros plan feuille/fruit).

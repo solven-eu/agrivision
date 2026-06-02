@@ -7,6 +7,7 @@
 import { DROPBOX_APP_KEY, DROPBOX_REDIRECT_URI } from "./config.js";
 import { tradeDropboxIdTokenForSession, logoutSession } from "./share.js";
 import { ensureSoilForSelected } from "./soil.js";
+import { ensureAltitudeForSelected } from "./elevation.js";
 
 /**
  * @param {object} app - dependency bundle:
@@ -473,60 +474,86 @@ export function createDbx(app) {
           soilFetched: false,
         });
       }
+      // Auto-lock parcels after restore — UX safety only (prevents accidental
+      // add/remove on tapping the map). No business / AI / persistence impact.
+      // The user can unlock explicitly from the parcel info panel.
+      if (app.selectedParcels.size > 0 && app.setParcelsLocked) {
+        app.setParcelsLocked(true);
+      }
       app.renderParcelHighlight();
       app.renderParcelInfoPanel();
       app.updateLockHint();
-      // After restore, kick off soil lookups for each parcel so the AI context block + the
-      // soil card pick them up. Fire-and-forget — the panel re-renders progressively.
+      // After restore, kick off soil + altitude lookups for each parcel so the AI context
+      // block + the soil card pick them up. Fire-and-forget — the panel re-renders
+      // progressively.
       ensureSoilForSelected(app.selectedParcels, () => app.renderParcelInfoPanel());
+      ensureAltitudeForSelected(app.selectedParcels, () => app.renderParcelInfoPanel());
 
-      // Photos: download each blob and rehydrate
+      // Photos: rehydrate metadata IMMEDIATELY (no network), download blobs IN BACKGROUND.
+      // This way the app becomes interactive as soon as the manifest is back; photo
+      // thumbnails fill in progressively (in order) while the user can already use the
+      // map, edit conversation, etc.
       const total = (manifest.photos || []).length;
-      let done = 0;
+      // Step 1 (sync): push placeholder photo objects so renderPhotos has something
+      // to draw. `dataUrl` is null until the blob arrives — photos.js shows a small
+      // "..." placeholder for photos without a dataUrl yet.
       for (const meta of manifest.photos || []) {
-        showLoading(`Téléchargement photo ${done + 1}/${total}…`, total > 0 ? done / total : null);
-        try {
-          const pr = await downloadFile(
-            `/crops/${cropCode}/cultures/${sid}${meta.file.startsWith("/") ? meta.file : "/" + meta.file}`
-          );
-          const blob = await pr.blob();
-          const dataUrl = await new Promise((res, rej) => {
-            const rd = new FileReader();
-            rd.onload = () => res(rd.result);
-            rd.onerror = rej;
-            rd.readAsDataURL(blob);
-          });
-          const photo = {
-            id: meta.id,
-            name: meta.name,
-            mime: meta.mime || blob.type || "image/jpeg",
-            b64: dataUrl.split(",")[1],
-            dataUrl,
-            width: meta.width,
-            height: meta.height,
-            lat: meta.lat,
-            lon: meta.lon,
-            locSource: meta.locSource,
-            direction: meta.direction,
-            takenAt: meta.takenAt ? new Date(meta.takenAt) : null,
-            takenAtSource: meta.takenAtSource || (meta.takenAt ? "exif" : null),
-            representative: meta.representative ?? null,
-            tags: meta.tags || null,
-            exifFound: true,
-            recompressed: false,
-            marker: null,
-            fovLayer: null,
-          };
-          app.photos.push(photo);
-          // Mark as already uploaded so it doesn't re-upload on next save
-          state.uploaded[photo.id] = { name: photo.name, mime: photo.mime };
-          if (photo.lat != null) app.placePhotoMarker(photo);
-        } catch (e) {
-          console.warn("photo reload failed", meta.file, e);
-        }
-        done++;
+        app.photos.push({
+          id: meta.id,
+          name: meta.name,
+          mime: meta.mime || "image/jpeg",
+          b64: null,
+          dataUrl: null,
+          loading: true,
+          width: meta.width,
+          height: meta.height,
+          lat: meta.lat,
+          lon: meta.lon,
+          locSource: meta.locSource,
+          direction: meta.direction,
+          takenAt: meta.takenAt ? new Date(meta.takenAt) : null,
+          takenAtSource: meta.takenAtSource || (meta.takenAt ? "exif" : null),
+          representative: meta.representative ?? null,
+          tags: meta.tags || null,
+          exifFound: true,
+          recompressed: false,
+          marker: null,
+          fovLayer: null,
+          _file: meta.file,
+        });
       }
-      showLoading(`Finalisation…`, 1);
+      // Step 2 (async, fire-and-forget): download each blob in the background and
+      // patch the corresponding photo object. Re-render after each so thumbnails
+      // appear progressively. Failures don't block the rest.
+      (async () => {
+        let done = 0;
+        for (const photo of app.photos) {
+          if (!photo._file) continue;
+          try {
+            const pr = await downloadFile(
+              `/crops/${cropCode}/cultures/${sid}${photo._file.startsWith("/") ? photo._file : "/" + photo._file}`
+            );
+            const blob = await pr.blob();
+            const dataUrl = await new Promise((res, rej) => {
+              const rd = new FileReader();
+              rd.onload = () => res(rd.result);
+              rd.onerror = rej;
+              rd.readAsDataURL(blob);
+            });
+            photo.b64 = dataUrl.split(",")[1];
+            photo.dataUrl = dataUrl;
+            photo.loading = false;
+            state.uploaded[photo.id] = { name: photo.name, mime: photo.mime };
+            if (photo.lat != null) app.placePhotoMarker(photo);
+          } catch (e) {
+            console.warn("photo reload failed", photo._file, e);
+            photo.loading = false;
+            photo.error = e.message;
+          }
+          done++;
+          app.renderPhotos();
+        }
+      })().catch((e) => console.warn("photo batch error", e));
       persistUploaded();
       app.renderPhotos();
 

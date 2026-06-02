@@ -1,6 +1,13 @@
 // AgriVision Cloudflare Worker — proxies Anthropic so the API key stays server-side.
 //
-// Dashboard: https://dash.cloudflare.com/ef022c9a994ccb0772ab8b3b43f25ffe/workers/services/view/agrivision-api/production
+// Cloudflare dashboard:
+//   https://dash.cloudflare.com/ef022c9a994ccb0772ab8b3b43f25ffe/workers/services/view/agrivision-api/production
+// Stripe dashboard (test mode):
+//   https://dashboard.stripe.com/acct_1TcLMIJAQgzNO5f0/test/dashboard
+// Stripe products / prices:
+//   https://dashboard.stripe.com/acct_1TcLMIJAQgzNO5f0/test/products
+// Stripe webhooks:
+//   https://dashboard.stripe.com/acct_1TcLMIJAQgzNO5f0/test/webhooks
 //
 // Routes:
 //   OPTIONS *                       → CORS preflight
@@ -19,6 +26,7 @@
 //   POST    /api/billing/checkout    → create Stripe Checkout Session (Bearer required)
 //   POST    /api/billing/portal      → create Stripe Customer Portal session (Bearer required)
 //   POST    /api/billing/webhook     → Stripe events → update user plan in KV
+//   GET     /api/billing/prices      → live Stripe Prices by lookup_key (public)
 //   GET     /api/events-feed        → fetch + normalize an allowlisted RSS/HTML feed
 //   GET     /api/vigicrues-stations → scrape Vigicrues Réunion station catalog
 //
@@ -237,7 +245,6 @@ function parseVigicruesStations(html) {
 // umbrella status item.
 function parseMeteoFranceVigilance(html, feed) {
   const text = stripTags(html);
-  const lower = text.toLowerCase();
   const items = [];
   // Validity window — typical wording: "valable de XX:XX à YY:YY" or "valide jusqu'au DD/MM/YYYY".
   let validityDate = null;
@@ -258,53 +265,24 @@ function parseMeteoFranceVigilance(html, feed) {
     }
   }
 
-  // Overall severity scan.
+  // NOTE: do NOT compute overall severity from a raw text scan of the page — the legend
+  // and explainer sections ("comprendre les niveaux : vert, jaune, orange, rouge") would
+  // false-trigger "high" even on calm days. We derive topSev below from the actual
+  // emitted phenomenon items instead.
   let topSev = null;
-  if (/\brouge\b/i.test(lower)) topSev = "high";
-  else if (/\borange\b/i.test(lower)) topSev = "high";
-  else if (/\bjaune\b/i.test(lower)) topSev = "med";
 
-  // Per-phenomenon extraction: look for known FR phenomenon keywords followed within a
-  // small window by a color word. Heuristic, resilient to small layout drifts.
-  const phenomena = [
-    { pat: /cyclon[ea-z]*\s+tropic[a-z]+/i, label: "Cyclone tropical" },
-    { pat: /fortes?\s+pluies?(?:\s+et\s+orages?)?/i, label: "Fortes pluies / orages" },
-    { pat: /vents?\s+forts?/i, label: "Vent fort" },
-    { pat: /mer\s+dangereuse(?:\s+à\s+la\s+côte)?/i, label: "Mer dangereuse à la côte" },
-    { pat: /houle\s+dangereuse/i, label: "Houle dangereuse" },
-    { pat: /orages?/i, label: "Orages" },
-    { pat: /canicule/i, label: "Canicule" },
-    { pat: /grand\s+froid/i, label: "Grand froid" },
-    { pat: /inondations?/i, label: "Inondations" },
-    { pat: /avalanche/i, label: "Avalanches" },
-  ];
-  const colorRe = /\b(vert|jaune|orange|rouge)\b/gi;
-  const sevFor = (c) => (c === "rouge" || c === "orange" ? "high" : c === "jaune" ? "med" : "low");
-  const seen = new Set();
-  for (const ph of phenomena) {
-    const m = text.match(ph.pat);
-    if (!m) continue;
-    // Search for a color word within ~200 chars after the phenomenon match.
-    const window = text.slice(m.index, m.index + 200);
-    colorRe.lastIndex = 0;
-    const cm = colorRe.exec(window);
-    if (!cm) continue;
-    const color = cm[1].toLowerCase();
-    if (color === "vert") continue;
-    const key = ph.label + "|" + color;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    items.push({
-      id: `mf-vigilance-${ph.label.replace(/\s+/g, "_")}-${color}`,
-      title: `${ph.label} — vigilance ${color}`,
-      link: feed.url,
-      date: validityDate,
-      severity: sevFor(color),
-      summary: `Vigilance Météo-France Réunion : ${ph.label} en ${color}`,
-    });
-  }
+  // Per-phenomenon extraction is intentionally NOT done here: heuristic regexes were
+  // over-matching legend text ("Niveaux de vigilance : Vert, Jaune, Orange, Rouge")
+  // and emitting phantom "Vent fort en orange" items on calm days. Without a stable
+  // structured marker on the page (data-attribute, headline class, JSON-LD), we can't
+  // distinguish current alerts from explainer text. We emit only the umbrella item
+  // with severity=low + the source link, letting the user check the bulletin themselves.
+  // When MF publishes a structured feed (or we find a reliable parse target), re-enable
+  // the per-phenomenon path and have `topSev` promoted by it.
 
   // Umbrella status item — always shown so the user can reach the bulletin even on calm days.
+  // Its severity reflects what we ACTUALLY found, not what the page text superficially
+  // mentions. No phenomenon-with-non-green-color found → calm.
   items.unshift({
     id: `mf-vigilance-bulletin-${validityDate || "current"}`,
     title:
@@ -350,11 +328,10 @@ function parseVigicruesReunion(html, feed) {
     }
   }
 
-  // Severity scan: any rouge / orange / jaune mention bumps the overall level.
+  // Severity is derived from emitted per-basin items below, NOT from a raw page-text
+  // scan — the legend/explainer text ("Niveaux : vert, jaune, orange, rouge") would
+  // otherwise false-trigger "high" on calm days.
   let topSev = null;
-  if (/\brouge\b/i.test(lower)) topSev = "high";
-  else if (/\borange\b/i.test(lower)) topSev = "high";
-  else if (/\bjaune\b/i.test(lower)) topSev = "med";
 
   // Try to extract per-river entries: a heading-like token (basin name) followed within
   // ~80 chars by a color word. Common Réunion watersheds — heuristic, not exhaustive.
@@ -370,6 +347,7 @@ function parseVigicruesReunion(html, feed) {
     seen.add(key);
     if (color === "vert") continue; // only emit non-trivial alerts
     const sev = color === "rouge" ? "high" : color === "orange" ? "high" : "med";
+    if (sev === "high" || topSev !== "high") topSev = sev; // promote, never demote
     items.push({
       id: `vigicrues-${name}-${color}`,
       title: `${name} — vigilance ${color}`,
@@ -424,7 +402,7 @@ export default {
       if (!env.AGRI_JWT_SECRET) return json({ error: "AGRI_JWT_SECRET not configured" }, 503, origin);
       const bearer = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
       const claims = await verifyAgriSession(env, bearer);
-      if (!claims) return json({ error: "invalid or expired session" }, 401, origin);
+      if (!claims) return json({ error: "session_invalid", message: "Session invalide" }, 401, origin);
       // Revoke the current jti (best-effort — non-fatal if SHARE_KV isn't bound).
       if (claims.jti && env.SHARE_KV) {
         const ttl = Math.max(60, (claims.exp || 0) - Math.floor(Date.now() / 1000));
@@ -485,6 +463,8 @@ export default {
       return billingPortal(req, env, origin);
     if (url.pathname === "/api/billing/webhook" && req.method === "POST")
       return billingWebhook(req, env, origin);
+    if (url.pathname === "/api/billing/prices" && req.method === "GET")
+      return billingPrices(req, env, origin);
 
     // POST /api/auth/dropbox/login — trade a verified Dropbox id_token for an AgriVision
     // session JWT. The SPA calls this once after the Dropbox OAuth code exchange, then
@@ -874,9 +854,14 @@ async function verifyAgriSession(env, jwt) {
 // AgriVision JWT once at /api/auth/dropbox/login — IdP tokens never appear here.
 async function resolveAccount(req, env) {
   const bearer = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
-  if (!bearer) return { error: "missing AgriVision session", status: 401 };
+  if (!bearer) return { error: "session_missing", message: "AgriVision session manquante", status: 401 };
   const claims = await verifyAgriSession(env, bearer);
-  if (!claims) return { error: "invalid or expired session", status: 401 };
+  if (!claims)
+    return {
+      error: "session_invalid",
+      message: "Session AgriVision invalide ou expirée — reconnectez-vous à Dropbox.",
+      status: 401,
+    };
   return { accountId: claims.sub, email: claims.email || null };
 }
 
@@ -1385,6 +1370,35 @@ async function mistralAnalyze(req, env, origin) {
     200,
     origin
   );
+}
+
+// GET /api/billing/prices — public, no auth. Returns active Stripe Prices keyed by
+// lookup_key so the client renders the **actual** configured prices (currency, interval,
+// amount) instead of hardcoded display strings that drift over time.
+async function billingPrices(req, env, origin) {
+  if (!env.STRIPE_SECRET_KEY) return json({ error: "STRIPE_SECRET_KEY not configured" }, 503, origin);
+  const lookupKeys = ["standard_monthly", "standard_yearly", "premium_monthly", "premium_yearly"];
+  const params = new URLSearchParams();
+  for (const k of lookupKeys) params.append("lookup_keys[]", k);
+  params.append("active", "true");
+  params.append("expand[]", "data.product");
+  const r = await stripeApi(env, "GET", `/v1/prices?${params}`);
+  const j = await r.json();
+  if (!j.data) return json({ error: "Stripe price fetch failed", details: j }, 500, origin);
+  const out = {};
+  for (const price of j.data) {
+    if (!price.lookup_key) continue;
+    out[price.lookup_key] = {
+      lookup_key: price.lookup_key,
+      currency: price.currency,
+      amount_cents: price.unit_amount,
+      recurring_interval: price.recurring?.interval, // "month" | "year"
+      recurring_interval_count: price.recurring?.interval_count || 1,
+      product_name: price.product?.name || null,
+      tax_behavior: price.tax_behavior || null, // "inclusive" | "exclusive" | "unspecified"
+    };
+  }
+  return json({ prices: out, fetched_at: new Date().toISOString() }, 200, origin);
 }
 
 async function billingCheckout(req, env, origin) {

@@ -4,6 +4,8 @@ import { aggregateParcels, parcelArea } from "./state.js";
 import { cardinal } from "./util.js";
 import { CULTU_LABELS } from "./catalog.js";
 import { soilContextBlock, soilSummaryLine } from "./soil.js";
+import { exposureHintFromAltitude } from "./elevation.js";
+import { climateContextBlock } from "./seasonal-normals.js";
 import { scoreSuitability } from "./culture-fit.js";
 
 export const SYSTEM_PROMPT = `MISSION ET LIMITES STRICTES (non-négociables)
@@ -31,6 +33,8 @@ Le contexte que tu reçois CONTIENT déjà, sans que tu aies à demander :
 - **Parcelles RPG sélectionnées** : surface, code culture, indicateur BIO.
 - **Photos** : EXIF GPS + direction quand disponibles.
 - **Sol typique de la zone** (quand La Réunion + parcelle sélectionnée) : type FAO, pH, CEC, N total, C organique, P, K, Mg, Ca, capacité au champ (pF 2.5), point de flétrissement (pF 4.2). Source : CIRAD/Nature 2026, médianes sur ~5 échantillons à proximité.
+- **Altitude par parcelle** (IGN RGE ALTI 5 m, FR métro + DOM) + indication qualitative d'exposition nuageuse proxy (côte sèche / mi-pente / haute montagne).
+- **Climatologie locale Réunion** (Météo-France 1991-2020) : saison en cours (humide/cyclonique vs sèche/hiver austral), exposition côte au vent / sous le vent, pluies normales du mois, températures normales (ajustées altitude), fenêtre cyclonique (15 nov–15 mai). Statique, toujours disponible quand La Réunion.
 
 → **Quand le bloc "SOL TYPIQUE DE LA ZONE" est présent, INTÈGRE-le dans ton raisonnement** : un cuivre est phytotoxique sous pH 5.5, un mancozèbe ne marche pas sur sol salin (Na haut), un déficit en K limite le rendement banane indépendamment des maladies, une CEC faible signifie qu'on ne peut pas fertiliser massivement en une fois (lessivage), etc.
 
@@ -280,6 +284,12 @@ export function buildContextBlock(ctx) {
     `Coordonnées de référence : ${lat.toFixed(5)}, ${lon.toFixed(5)} (hémisphère ${lat >= 0 ? "nord" : "sud"})`
   );
   lines.push(`Saison courante : ${seasonFromDate(today, lat)}`);
+  // Local climatology — bundled static normals (Réunion only for now). Returns null
+  // off-island, in which case nothing is added.
+  const firstParcelForClimate = selectedParcels.size > 0 ? selectedParcels.values().next().value : null;
+  const altForClimate = firstParcelForClimate?.altitude ?? null;
+  const climate = climateContextBlock(today, lat, lon, altForClimate);
+  if (climate) lines.push("\n" + climate);
   // Soil context — derived from the first selected parcel's cached lookup. The parcels
   // module pre-fetches soil data on selection (via fetchSoilAt) and attaches it to the
   // parcel object. If present, it's a small "SOL TYPIQUE DE LA ZONE" block with the
@@ -306,15 +316,17 @@ export function buildContextBlock(ctx) {
       const a = parcelArea(p.props).toFixed(3);
       const [lat0, lon0] = p.latlng;
       const label = CULTU_LABELS[p.props.code_cultu] || p.props.code_cultu || "?";
-      // Per-parcel soil + culture-fit context (compact one-liner). Cheap (~1 line/parcel)
-      // so we push it always when available — see CLAUDE.md "DONNÉES DISPONIBLES" guidance.
+      // Per-parcel soil + culture-fit + altitude context. Cheap (~1-2 lines/parcel) so
+      // we push it always when available — see CLAUDE.md "DONNÉES DISPONIBLES" guidance.
       const soilLine = soilSummaryLine(p.soil);
       const fit = scoreSuitability(p.soil, p.props.code_cultu);
       const fitTxt = fit
         ? ` · soil-fit ${fit.score}% (${fit.label})${fit.reasons.length ? " — " + fit.reasons.join(", ") : ""}`
         : "";
+      const altTxt =
+        p.altitude != null ? ` · alt. ${p.altitude} m (${exposureHintFromAltitude(p.altitude)})` : "";
       lines.push(
-        `  ${i + 1}. ${label} (code_cultu=${p.props.code_cultu}) · ${a} ha · centre ≈ ${lat0.toFixed(5)},${lon0.toFixed(5)}${p.props.bio === 1 ? " · bio" : ""}${soilLine ? `\n     sol : ${soilLine}` : ""}${fitTxt}`
+        `  ${i + 1}. ${label} (code_cultu=${p.props.code_cultu}) · ${a} ha${altTxt} · centre ≈ ${lat0.toFixed(5)},${lon0.toFixed(5)}${p.props.bio === 1 ? " · bio" : ""}${soilLine ? `\n     sol : ${soilLine}` : ""}${fitTxt}`
       );
     });
   } else {

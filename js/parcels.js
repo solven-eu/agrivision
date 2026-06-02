@@ -8,6 +8,7 @@ import { CULTU_LABELS, cropMeta, resolveIdentifiedCropMeta } from "./catalog.js"
 import { pointInGeom } from "./util.js";
 import { aggregateParcels, parcelArea } from "./state.js";
 import { fetchSoilAt, renderSoilCard } from "./soil.js";
+import { fetchAltitude, exposureHintFromAltitude } from "./elevation.js";
 import { scoreSuitability, colorForScore, evaluateParcel, scoreAllCrops } from "./culture-fit.js";
 import { PLAN_FEATURES } from "./plan-features.js";
 
@@ -58,23 +59,25 @@ function renderComponentSlider(comp) {
     </div>`;
 }
 
-function renderParcelBreakdown(parcel) {
-  const code = parcel.props?.code_cultu || "UNK";
+function renderParcelBreakdown(parcel, idx, identifiedCrop) {
   if (!parcel.soil?.summary) {
     return `<div class="small" style="color:var(--muted)">Pas de données sol pour cette parcelle.</div>`;
   }
-  const evalRes = evaluateParcel(parcel.soil, code);
-  if (!evalRes) {
-    return `<div class="small" style="color:var(--muted)">Score non calculable pour ${code}.</div>`;
-  }
-  const compHtml = ["pH", "CEC", "K"].map((k) => renderComponentSlider(evalRes.components[k])).join("");
-  // Independent crop recommendations — top 5 best-fit crops for this soil.
-  const all = scoreAllCrops(parcel.soil);
-  const top = all.slice(0, 5);
+  // Effective crop = AI identification if available (e.g. "BAN" inferred from a banana
+  // photo), else the RPG code. This fixes the "RPG says BCA / unknown but the AI saw
+  // bananas" case — we use the better signal.
+  const rpgCode = parcel.props?.code_cultu;
+  const aiCode = identifiedCrop?.code_cultu;
+  const rawCode = aiCode || rpgCode;
+  // "Known crop" = a code that resolves to a real label.
+  const hasKnownCrop = !!(rawCode && rawCode !== "UNK" && CULTU_LABELS[rawCode]);
+
+  // Top-N crop recommendations — always computed, but presentation differs.
+  const top = scoreAllCrops(parcel.soil).slice(0, 5);
   const recoHtml = top
     .map((r) => {
       const label = CULTU_LABELS[r.crop] || r.crop;
-      const isCurrent = r.crop === code;
+      const isCurrent = r.crop === rawCode;
       const color = colorForScore(r.score);
       return `<div style="display:flex;justify-content:space-between;padding:2px 0">
         <span>${isCurrent ? "★ " : ""}${label} <span class="small" style="color:var(--muted)">(${r.crop})</span></span>
@@ -82,12 +85,32 @@ function renderParcelBreakdown(parcel) {
       </div>`;
     })
     .join("");
+
+  if (!hasKnownCrop) {
+    // No declared crop → recommendations are the primary display, no sliders.
+    return `
+      <div style="padding:8px;background:var(--panel);border-radius:4px;margin-top:4px;font-size:12px">
+        <div class="small" style="color:var(--muted);margin-bottom:4px">
+          Aucune culture déclarée sur cette parcelle. Cultures recommandées pour ce sol :
+        </div>
+        ${recoHtml}
+      </div>`;
+  }
+
+  // Crop known → score detail for THAT crop is primary; alternatives behind a toggle.
+  const evalRes = evaluateParcel(parcel.soil, rawCode);
+  if (!evalRes) {
+    return `<div class="small" style="color:var(--muted)">Score non calculable pour ${rawCode}.</div>`;
+  }
+  const compHtml = ["pH", "CEC", "K"].map((k) => renderComponentSlider(evalRes.components[k])).join("");
+  const recosId = `parcel-recos-${idx}`;
   return `
     <div style="padding:8px;background:var(--panel);border-radius:4px;margin-top:4px;font-size:12px">
-      <div class="small" style="color:var(--muted);margin-bottom:2px">Score détaillé pour la culture actuelle</div>
+      <div class="small" style="color:var(--muted);margin-bottom:2px">Score détaillé pour ${CULTU_LABELS[rawCode]}</div>
       ${compHtml}
       ${evalRes.reasons.length ? `<div class="small" style="margin-top:6px;color:var(--bad)">⚠ ${evalRes.reasons.join(" · ")}</div>` : ""}
-      <div style="border-top:1px dashed var(--border);margin-top:8px;padding-top:6px">
+      <button class="secondary parcel-recos-toggle" data-target="${recosId}" style="font-size:11px;padding:3px 8px;margin-top:8px">▾ Voir alternatives</button>
+      <div id="${recosId}" style="display:none;border-top:1px dashed var(--border);margin-top:6px;padding-top:6px">
         <div class="small" style="color:var(--muted);margin-bottom:4px">Cultures recommandées pour ce sol (★ = actuelle)</div>
         ${recoHtml}
       </div>
@@ -105,10 +128,39 @@ function renderParcelBreakdown(parcel) {
 export function installParcels(app) {
   const parcelInfoEl = document.getElementById("parcel-info");
   const parcelHighlight = L.featureGroup().addTo(app.map);
+  // Active = the SUBSET of selected parcels the user is currently focused on. Distinct
+  // from the selection itself. Clicking a parcel row in the sidebar (or a polygon on the
+  // map, when locked) toggles membership in this set. Used by future "contextual tools"
+  // that should operate only on the focused subset (e.g. analyze only those photos that
+  // sit in the focused parcels, run disease funnel on just one parcel of the field, etc.).
+  // Empty set = all selected parcels are considered "in scope" (no narrowing applied).
+  const activeParcelIds = new Set();
+  function toggleActive(id) {
+    if (activeParcelIds.has(id)) activeParcelIds.delete(id);
+    else activeParcelIds.add(id);
+  }
 
   const featureKey = (f) =>
     f.id ||
     `${f.properties.pacage}-${f.properties.num_ilot}-${f.properties.num_parcel}-${f.properties.code_cultu}`;
+
+  // Point-in-polygon helper: which selected parcel contains the given lat/lon (if any)?
+  // Used for photo → parcel association. v1 covers photos taken INSIDE the parcel; FOV
+  // ray-casting for photos pointing AT a parcel from outside is a ROADMAP item.
+  function findParcelForPoint(lat, lon) {
+    if (lat == null || lon == null) return null;
+    const pt = [lon, lat];
+    for (const [id, p] of app.selectedParcels) {
+      if (p.geometry && pointInGeom(pt, p.geometry)) return id;
+    }
+    return null;
+  }
+  // Recompute photo→parcel associations whenever the selection changes.
+  function refreshPhotoAssociations() {
+    for (const photo of app.photos || []) {
+      photo.associatedParcelId = findParcelForPoint(photo.lat, photo.lon);
+    }
+  }
 
   async function toggleParcelAt(latlng) {
     const { lat, lng: lon } = latlng;
@@ -135,6 +187,29 @@ export function installParcels(app) {
       const pt = [lon, lat];
       const hit = j.features.find((f) => pointInGeom(pt, f.geometry)) || j.features[0];
       const id = featureKey(hit);
+      const locked = app.getParcelsLocked?.();
+      // Lock semantics: when locked, map clicks no longer add/remove from the selection.
+      // They DO toggle the "active/focused" parcel — same behaviour as clicking a row in
+      // the sidebar. Lets the user explore which parcel is which without disturbing the
+      // selection.
+      if (locked) {
+        if (app.selectedParcels.has(id)) {
+          toggleActive(id);
+          renderParcelHighlight();
+          renderParcelInfoPanel();
+          // Locked-click is intended to "see this parcel in the tools" — make sure the
+          // section is open and the just-clicked row is scrolled into view.
+          const sec = document.getElementById("parcels-section");
+          if (sec && !sec.open) sec.open = true;
+          if (activeParcelIds.has(id)) {
+            const row = parcelInfoEl.querySelector(`.parcel-row[data-parcel-id="${id}"]`);
+            row?.scrollIntoView({ behavior: "smooth", block: "center" });
+          }
+          return;
+        }
+        app.flashLockHint?.();
+        return;
+      }
       if (app.selectedParcels.has(id)) app.selectedParcels.delete(id);
       else {
         const cap = maxParcelsForCurrentPlan();
@@ -153,10 +228,12 @@ export function installParcels(app) {
           latlng: [lat, lon],
           soil: null,
           soilFetched: false,
+          altitude: null,
+          altitudeFetched: false,
         };
         app.selectedParcels.set(id, parcel);
-        // Fire-and-forget soil lookup at the click point. On result, attach to the parcel
-        // and re-render so the soil card appears + the AI context picks it up next call.
+        // Fire-and-forget soil + altitude lookups. Each resolves independently and
+        // triggers a re-render so the info panel populates progressively.
         fetchSoilAt(lat, lon)
           .then((soil) => {
             parcel.soil = soil;
@@ -168,11 +245,28 @@ export function installParcels(app) {
             parcel.soilFetched = true;
             renderParcelInfoPanel();
           });
+        fetchAltitude(lat, lon)
+          .then((alt) => {
+            parcel.altitude = alt;
+            parcel.altitudeFetched = true;
+            renderParcelInfoPanel();
+          })
+          .catch(() => {
+            parcel.altitudeFetched = true;
+            renderParcelInfoPanel();
+          });
       }
+      // Selection changed → re-evaluate which photos sit inside which parcels.
+      refreshPhotoAssociations();
       renderParcelHighlight();
       renderParcelInfoPanel();
+      app.renderPhotos?.();
       updateLockHint();
       updateSelectHint();
+      // USER click → open the section so the user sees the result. Restore-time
+      // re-renders don't reach this code path, so reloads keep everything folded.
+      const sec = document.getElementById("parcels-section");
+      if (sec && app.selectedParcels.size > 0 && !sec.open) sec.open = true;
     } catch (err) {
       parcelInfoEl.innerHTML = `<dt>Erreur</dt><dd>${err.message}</dd>`;
       parcelInfoEl.style.display = "block";
@@ -181,10 +275,15 @@ export function installParcels(app) {
 
   function renderParcelHighlight() {
     parcelHighlight.clearLayers();
-    for (const [, p] of app.selectedParcels) {
-      const layer = L.geoJSON(p.geometry, {
-        style: { color: "#4ade80", weight: 2, fillColor: "#4ade80", fillOpacity: 0.35 },
-      }).addTo(parcelHighlight);
+    for (const [pid, p] of app.selectedParcels) {
+      const isActive = activeParcelIds.has(pid);
+      // Active parcels get a brighter, thicker BORDER. Fill stays green (same as inactive)
+      // so the highlight doesn't drown out the underlying RPG colors. The border alone is
+      // enough to mark active membership.
+      const style = isActive
+        ? { color: "#fbbf24", weight: 5, fillColor: "#4ade80", fillOpacity: 0.35 }
+        : { color: "#4ade80", weight: 2, fillColor: "#4ade80", fillOpacity: 0.35 };
+      const layer = L.geoJSON(p.geometry, { style }).addTo(parcelHighlight);
       const identified = resolveIdentifiedCropMeta(app.getAnalysisCombined()?.identification);
       const meta = identified || cropMeta(p.props?.code_cultu);
       // Effective BIO: user override wins, else fall back to the RPG flag.
@@ -255,8 +354,9 @@ export function installParcels(app) {
     // score (rules-based — see js/culture-fit.js). Soil and fit appear progressively as
     // fetchSoilAt resolves; "…" is the in-flight placeholder.
     let idx = 0;
-    for (const [, p] of app.selectedParcels) {
+    for (const [pid, p] of app.selectedParcels) {
       idx++;
+      const isActive = activeParcelIds.has(pid);
       const code = p.props?.code_cultu || "UNK";
       const label = CULTU_LABELS[code] || code;
       const emoji = cropMeta(code)?.emoji || "🌾";
@@ -287,10 +387,24 @@ export function installParcels(app) {
       const expandBtn = hasSoil
         ? `<button class="secondary parcel-expand" data-detail="${detailId}" style="font-size:10px;padding:1px 6px;float:right" title="Détail du score + cultures recommandées">▾ Détail</button>`
         : "";
-      html += `<dd style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border)">
-        ${expandBtn}<b>P${idx}.</b> ${emoji} ${label} <span class="small" style="color:var(--muted)">(${code})</span>${bio} · <b>${area} ha</b>
+      // Altitude chip + cloud-cover proxy from elevation. Both fetched via IGN's free
+      // /altimetrie/ REST endpoint. Hints at exposure without claiming measured insolation.
+      const altChip =
+        p.altitude != null
+          ? ` · 📐 <b>${p.altitude} m</b><span class="small" style="color:var(--muted)"> (${exposureHintFromAltitude(p.altitude)})</span>`
+          : !p.altitudeFetched
+            ? ` · <span class="small" style="color:var(--muted)">📐 altitude…</span>`
+            : "";
+      // Photo count associated with this parcel (point-in-polygon, v1).
+      const photoCount = (app.photos || []).filter((ph) => ph.associatedParcelId === pid).length;
+      const photoChip = photoCount ? ` · 📷 <b>${photoCount}</b>` : "";
+      const activeBg = isActive
+        ? "background:rgba(251,191,36,0.18);border-left:3px solid var(--warn);padding-left:6px"
+        : "";
+      html += `<dd class="parcel-row" data-parcel-id="${pid}" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);cursor:pointer;${activeBg}">
+        ${expandBtn}<b>P${idx}.</b> ${emoji} ${label} <span class="small" style="color:var(--muted)">(${code})</span>${bio} · <b>${area} ha</b>${altChip}${photoChip}
         <div style="margin-top:2px">${detail}</div>
-        <div id="${detailId}" style="display:none">${hasSoil ? renderParcelBreakdown(p) : ""}</div>
+        <div id="${detailId}" style="display:none">${hasSoil ? renderParcelBreakdown(p, idx, resolveIdentifiedCropMeta(app.getAnalysisCombined?.()?.identification)) : ""}</div>
       </dd>`;
     }
     html += `<div style="margin-top:8px;display:flex;gap:6px;align-items:center">
@@ -313,6 +427,16 @@ export function installParcels(app) {
     if (firstParcel?.soil) html += renderSoilCard(firstParcel.soil);
     parcelInfoEl.innerHTML = html;
     parcelInfoEl.style.display = "block";
+    // Update the summary label count (always). Auto-opening the section is done only
+    // from toggleParcelAt below — i.e. on a USER click — so a Dropbox restore that
+    // re-renders the panel does NOT pop the section open every page load.
+    const sumLabel = document.getElementById("parcels-summary-label");
+    if (sumLabel) {
+      sumLabel.textContent =
+        app.selectedParcels.size > 0
+          ? `Parcelles sélectionnées (${app.selectedParcels.size})`
+          : "Parcelles sélectionnées";
+    }
     document.getElementById("clear-parcels").onclick = () => {
       if (app.getParcelsLocked()) return;
       app.selectedParcels.clear();
@@ -343,6 +467,37 @@ export function installParcels(app) {
         const open = target.style.display !== "none";
         target.style.display = open ? "none" : "block";
         btn.textContent = open ? "▾ Détail" : "▴ Masquer";
+      };
+    });
+    // Nested toggle inside the breakdown: show/hide the crop alternatives list when
+    // a crop is already declared (alternatives are secondary in that case).
+    parcelInfoEl.querySelectorAll(".parcel-recos-toggle").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const target = document.getElementById(btn.dataset.target);
+        if (!target) return;
+        const open = target.style.display !== "none";
+        target.style.display = open ? "none" : "block";
+        btn.textContent = open ? "▾ Voir alternatives" : "▴ Masquer alternatives";
+      };
+    });
+    // Row click → toggle membership in the active-subset. Multi-select supported: each
+    // click adds or removes one parcel from the focused subset. Map view pans to the
+    // most-recently-toggled parcel for visual feedback (only when the toggle ADDED it).
+    parcelInfoEl.querySelectorAll(".parcel-row").forEach((row) => {
+      row.onclick = (e) => {
+        // Avoid intercepting nested buttons (expand, recos toggle, lock select).
+        if (e.target.closest("button, select, a, input")) return;
+        const pid = row.dataset.parcelId;
+        if (!pid) return;
+        const wasActive = activeParcelIds.has(pid);
+        toggleActive(pid);
+        renderParcelHighlight();
+        renderParcelInfoPanel();
+        const parcel = app.selectedParcels.get(pid);
+        if (!wasActive && parcel?.latlng) {
+          app.map.setView(parcel.latlng, Math.max(app.map.getZoom(), 16), { animate: true });
+        }
       };
     });
   }
@@ -436,5 +591,14 @@ export function installParcels(app) {
     updateLockHint,
     flashLockHint,
     showZoomTooLowMessage,
+    // Photo → parcel association (point-in-polygon for v1). Called by main.js after a
+    // photo is added, moved, or restored from Dropbox so the parcel row's 📷 N count
+    // reflects reality. FOV ray-casting for outside-pointing-at-parcel photos: ROADMAP.
+    refreshPhotoAssociations,
+    // The active-subset (Set of parcel ids) is exposed read-only so future "contextual
+    // tools" (focused-only analyze, photo filter, etc.) can read the user's narrowing.
+    // An empty set means "no narrowing — use the full selection".
+    getActiveParcelIds: () => new Set(activeParcelIds),
+    clearActive: () => activeParcelIds.clear(),
   };
 }

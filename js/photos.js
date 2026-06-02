@@ -51,17 +51,34 @@ export function createPhotos(app) {
       });
     });
     if (p.direction != null) {
-      const fov = 60,
-        range = 80;
-      const left = destPoint(p.lat, p.lon, p.direction - fov / 2, range);
-      const right = destPoint(p.lat, p.lon, p.direction + fov / 2, range);
-      p.fovLayer = L.polygon([[p.lat, p.lon], left, right], {
+      const fov = 60;
+      const range = 80;
+      // Render the field-of-view as 4 nested wedges at increasing range. Each wedge
+      // contributes 0.08 fill opacity; their overlap creates a gradient that's darker
+      // near the camera (4 layers stacked) and fades toward the far edge (1 layer),
+      // so the direction is unambiguous at a glance. Outermost gets a thin outline.
+      const layers = L.featureGroup();
+      const slices = 4;
+      for (let i = slices; i >= 1; i--) {
+        const r = (range * i) / slices;
+        const left = destPoint(p.lat, p.lon, p.direction - fov / 2, r);
+        const right = destPoint(p.lat, p.lon, p.direction + fov / 2, r);
+        L.polygon([[p.lat, p.lon], left, right], {
+          stroke: false,
+          fillColor: "#4ade80",
+          fillOpacity: 0.08,
+          interactive: false,
+        }).addTo(layers);
+      }
+      const leftEdge = destPoint(p.lat, p.lon, p.direction - fov / 2, range);
+      const rightEdge = destPoint(p.lat, p.lon, p.direction + fov / 2, range);
+      L.polygon([[p.lat, p.lon], leftEdge, rightEdge], {
         color: "#4ade80",
         weight: 1,
-        fillColor: "#4ade80",
-        fillOpacity: 0.18,
+        fill: false,
         interactive: false,
-      }).addTo(app.map);
+      }).addTo(layers);
+      p.fovLayer = layers.addTo(app.map);
     }
   }
 
@@ -121,6 +138,20 @@ export function createPhotos(app) {
             ? "PAS représentative (atypique)"
             : "Représentativité inconnue";
       const repBadge = `<button class="rep-toggle" data-id="${p.id}" title="${repTitle}" style="background:transparent;border:1px solid var(--border);color:inherit;border-radius:8px;padding:1px 5px;font-size:9px;cursor:pointer">Repr. ${repState}</button>`;
+      // Parcel association badge (point-in-polygon for v1). The parcel index comes from
+      // the parcels-module ordering — we look it up at render time so reorderings stay
+      // consistent. Photos with no association show nothing.
+      let parcelBadge = "";
+      if (p.associatedParcelId && app.selectedParcels) {
+        let pIdx = 0;
+        for (const k of app.selectedParcels.keys()) {
+          pIdx++;
+          if (k === p.associatedParcelId) {
+            parcelBadge = `<span style="background:rgba(74,222,128,0.18);color:var(--accent);padding:1px 5px;border-radius:8px;font-size:9px" title="Photo dans la parcelle P${pIdx}">📍 P${pIdx}</span>`;
+            break;
+          }
+        }
+      }
       wrap.innerHTML = `
         <div class="photo-slot" data-photo-id="${p.id}" style="position:relative;cursor:${p.lat != null ? "crosshair" : "default"}" title="${p.lat != null ? "Cliquer autour de la photo pour recentrer la carte" : ""}">
           <img class="photo-img" src="${p.dataUrl}" alt="${p.name}" data-photo-id="${p.id}" style="cursor:zoom-in" title="Cliquer pour agrandir" />

@@ -1,5 +1,17 @@
 # Roadmap
 
+## Climate context — dynamic ENSO + seasonal forecast integration
+
+Today (v1, shipped): `js/seasonal-normals.js` carries static 1991-2020 monthly normals for La Réunion (rainfall windward/leeward, temperature, cyclone window) and injects them into every AI call's context block plus a "🗓️ Climatologie locale" card in the sidebar. That covers the "typical seasonality" question — raining seasons, cyclone window, normal temps — and the AI can reason about disease pressure and treatment timing accordingly.
+
+What's missing — and what to add when the value is clearer:
+
+- **v2 — NOAA CPC ENSO Diagnostic Discussion** monthly. Free REST + RSS feed. Adds a single field to the climate block: `phase: "neutral" | "el_nino" | "la_nina"` + `strength: "weak" | "moderate" | "strong"`. Réunion impact: El Niño = drier-than-normal saison cyclonique (lower cyclone count but more drought stress on canne mi-pente); La Niña = wetter + cyclone-prone. The AI prompt would mention this so disease pressure and irrigation recommendations adjust.
+- **v3 — Copernicus Climate Change Service (C3S) seasonal forecast** (3-6 month outlook). Free with a CDS account, returns probability of temperature + precipitation anomalies by region. Higher resolution than ENSO alone. Best value: ahead-of-season recommendations ("the next 3 months are forecast 40 % more rainy than normal → plant resistant cultivars + plan extra fungicide passes"). Higher build cost: CDS API requires auth + their data model needs a Worker route to mediate.
+- **v4 — In-prompt ENSO reasoning**. The AI is told _what_ the ENSO state is but not necessarily _how_ it affects Réunion crops. v4 = a curated impact matrix (per crop × per ENSO phase: yield delta, disease shift, harvest window shift) that the prompt uses to reason concretely instead of relying on the model's training-data recall.
+
+**Why we're deferring this** (user's call): the value of pushing static normals to the AI is concrete and immediate (the model already uses them effectively). ENSO state is one number per month — useful but marginal unless we also wire the impact-matrix reasoning (v4), which is real agronomic work. Worth revisiting once we see how often the AI's recommendations need climate-trend-aware tweaks in practice.
+
 ## Multi-AI ensemble — cross-validate suggestions across providers before showing the user
 
 Today every analysis goes through a single Claude model (`claude-haiku-4-5` by default). That's fast and cheap, but every model has its blind spots: Haiku can miss subtle disease symptoms, get cultivars wrong, or be overconfident on a poor-quality photo. Right now the user sees a single "oracle" answer with no cross-check.
