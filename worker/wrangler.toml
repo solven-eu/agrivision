@@ -21,6 +21,13 @@ FACEBOOK_APP_ID = "26899197766369996"   # must match FACEBOOK_APP_ID in js/confi
 # Without them /api/satellite/* returns 503. For local dev, add both to worker/.dev.vars.
 # Optional [vars] CDSE_BASE to use a commercial Sentinel Hub account instead of CDSE.
 
+# Météo-France (weather: rainfall, AROME-OI). OAuth2 client-credentials — the value is the
+# Basic-auth string base64(consumerKey:consumerSecret) from the portal token page:
+#   wrangler secret put METEOFRANCE_APPLICATION_ID
+# For local dev, add it to worker/.dev.vars. The Worker exchanges it for a ~1h bearer token
+# (cached). Manage the app / keys / subscriptions (DPObs, Vigilance, Paquets Modèles) here:
+#   https://portail-api.meteofrance.fr/web/fr/dashboard
+
 # AgriVision session JWT secret. Used to sign HS256 session tokens minted at
 # /api/auth/dropbox/login. Generate with: openssl rand -hex 32
 # Then: wrangler secret put AGRI_JWT_SECRET
@@ -47,3 +54,12 @@ FACEBOOK_APP_ID = "26899197766369996"   # must match FACEBOOK_APP_ID in js/confi
 [[kv_namespaces]]
 binding = "SHARE_KV"
 id = "local_placeholder_replace_before_deploy"
+
+# Rain alerts (Web Push). VAPID private key (P-256 scalar, base64url) — pairs with the public
+# key in js/config.js + worker.js VAPID_PUBLIC_KEY. Regenerate the pair to rotate.
+#   wrangler secret put VAPID_PRIVATE_KEY
+# For local dev add it to worker/.dev.vars. Without it, /api/alerts/* returns 503.
+# The cron below polls forecasts every 6h and pushes when rain ≥ threshold is coming
+# (only runs on the DEPLOYED Worker, not in `wrangler dev`).
+[triggers]
+crons = ["0 */6 * * *"]

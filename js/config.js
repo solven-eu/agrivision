@@ -51,6 +51,12 @@ export const GOOGLE_CLIENT_ID =
 //   https://developers.facebook.com/apps/26899197766369996/settings/basic/
 export const FACEBOOK_APP_ID = "26899197766369996";
 
+// === Web Push (rain alerts) ===
+// VAPID public key (applicationServerKey). The matching private key is the Worker secret
+// VAPID_PRIVATE_KEY. Regenerate the pair with `node` (EC prime256v1) if rotating.
+// Empty → the rain-alert subscribe UI is hidden.
+export const VAPID_PUBLIC_KEY = "BM8aw9vXzVz3Zz2vHzwBYIE-DtzaI8rXXE-D3qKkARciYdeJHYANsD35fnapqNSlXHNG4npu7_Wv6qcxItF7Jj4";
+
 // === Stripe (billing) ===
 // Dashboard (test mode): https://dashboard.stripe.com/acct_1TcLMIJAQgzNO5f0/test/dashboard
 // Products / prices:     https://dashboard.stripe.com/acct_1TcLMIJAQgzNO5f0/test/products

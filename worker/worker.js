@@ -28,6 +28,11 @@
 //   POST    /api/satellite/catalog   → Sentinel-2 acquisitions over bbox (Bearer required)
 //   POST    /api/satellite/image     → NDVI/true-color PNG for bbox+day (Bearer required)
 //   POST    /api/satellite/statistics→ per-geometry NDVI mean time series (Bearer required)
+//   GET     /api/weather             → MF observed rain + Open-Meteo forecast/soil (Bearer req.)
+//   POST    /api/alerts/subscribe    → store push subscription + parcels for rain alerts
+//   POST    /api/alerts/unsubscribe  → remove rain-alert subscription
+//   POST    /api/alerts/test         → send a test Web Push to confirm delivery
+//   (cron `scheduled`)               → poll forecasts, push when rain ≥ threshold is coming
 //   GET     /api/share/status       → last sync info (Bearer required)
 //   POST    /api/share/save         → mirror manifest + photos into KV (Bearer required)
 //   DELETE  /api/share/account      → purge user's data from KV (Bearer required)
@@ -51,6 +56,9 @@
 //   CDSE_CLIENT_ID          (set via: wrangler secret put CDSE_CLIENT_ID) — Copernicus Data
 //                            Space OAuth client id for Sentinel-2 imagery.
 //   CDSE_CLIENT_SECRET      (set via: wrangler secret put CDSE_CLIENT_SECRET) — its secret.
+//   METEOFRANCE_APPLICATION_ID (set via: wrangler secret put METEOFRANCE_APPLICATION_ID) —
+//                            base64(consumerKey:consumerSecret) for Météo-France. Manage app
+//                            + subscriptions: https://portail-api.meteofrance.fr/web/fr/dashboard
 //
 // Optional environment:
 //   ALLOWED_ORIGIN          (defaults to "*"; set to your hosting origin to lock it down)
@@ -90,6 +98,8 @@ const OIDC_PROVIDERS = {
 // Copernicus Data Space Ecosystem (CDSE) — free Sentinel Hub-compatible APIs for Sentinel-2
 // imagery. OAuth2 client-credentials (our credentials, server-side only). Override the base
 // via env CDSE_BASE to point at commercial Sentinel Hub (services.sentinel-hub.com) instead.
+// Dashboard (register the OAuth client → CDSE_CLIENT_ID / CDSE_CLIENT_SECRET, monitor quota):
+//   https://shapps.dataspace.copernicus.eu/dashboard/
 const CDSE = {
   token: "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
   base: "https://sh.dataspace.copernicus.eu",
@@ -638,6 +648,22 @@ export default {
     if (url.pathname === "/api/satellite/statistics" && req.method === "POST") {
       return satelliteStatistics(req, env, origin);
     }
+    // GET /api/weather?lat=&lon= — observed rain (nearest Météo-France station) + forecast
+    // precipitation, soil moisture & ET0 (Open-Meteo) → a per-parcel water picture.
+    if (url.pathname === "/api/weather" && req.method === "GET") {
+      return weatherHandler(req, env, origin);
+    }
+    // Rain alerts (Web Push). subscribe stores {subscription, parcels} in KV; the cron
+    // (scheduled handler) polls forecasts and pushes when rain ≥ threshold is coming.
+    if (url.pathname === "/api/alerts/subscribe" && req.method === "POST") {
+      return alertsSubscribe(req, env, origin);
+    }
+    if (url.pathname === "/api/alerts/unsubscribe" && req.method === "POST") {
+      return alertsUnsubscribe(req, env, origin);
+    }
+    if (url.pathname === "/api/alerts/test" && req.method === "POST") {
+      return alertsTest(req, env, origin);
+    }
 
     // GET /api/vigicrues-stations — scrapes the donnees.php menu structure,
     // returns { regions: [{name, rivers: [{name, stations: [{id, name}]}]}] }.
@@ -824,6 +850,11 @@ export default {
       status: upstream.status,
       headers: { ...passThrough, ...corsHeaders(origin) },
     });
+  },
+
+  // Cron Trigger — polls forecasts and pushes rain alerts. Schedule in wrangler.toml.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runRainAlerts(env));
   },
 };
 
@@ -1447,6 +1478,371 @@ async function satelliteImage(req, env, origin) {
   } catch (e) {
     return json({ error: e.message }, 502, origin);
   }
+}
+
+// ============================================================================
+// Weather / water — observed rainfall from the nearest Météo-France station (DPObs) +
+// forecast precipitation, soil moisture and ET0 from Open-Meteo (free, keyless). Together:
+// rain that fell, rain coming, soil humidity, and a water balance. Secret:
+// METEOFRANCE_APPLICATION_ID (OAuth2 Basic → bearer). Manage app + subscriptions:
+//   https://portail-api.meteofrance.fr/web/fr/dashboard
+// ============================================================================
+const MF_BASE = "https://public-api.meteofrance.fr/public";
+let _mfToken = { value: null, exp: 0 };
+let _mfStations = { list: null, exp: 0 }; // in-isolate cache of the DPObs station list
+
+async function getMeteoFranceToken(env) {
+  if (!env.METEOFRANCE_APPLICATION_ID) throw new Error("METEOFRANCE_APPLICATION_ID not configured");
+  const now = Math.floor(Date.now() / 1000);
+  if (_mfToken.value && _mfToken.exp - 60 > now) return _mfToken.value;
+  const r = await fetch("https://portail-api.meteofrance.fr/token", {
+    method: "POST",
+    headers: {
+      authorization: `Basic ${env.METEOFRANCE_APPLICATION_ID}`,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: "grant_type=client_credentials",
+  });
+  if (!r.ok) throw new Error("MF token " + r.status);
+  const j = await r.json();
+  _mfToken = { value: j.access_token, exp: now + (j.expires_in || 3600) };
+  return _mfToken.value;
+}
+
+// DPObs station list (CSV, ~140 KB). Cached in-isolate for 24h; parsed to {id,lat,lon,nom}.
+async function getMfStations(env) {
+  const now = Math.floor(Date.now() / 1000);
+  if (_mfStations.list && _mfStations.exp > now) return _mfStations.list;
+  const token = await getMeteoFranceToken(env);
+  const r = await fetch(`${MF_BASE}/DPObs/v1/liste-stations?format=json`, {
+    headers: { authorization: `Bearer ${token}` },
+    cf: { cacheTtl: 86400, cacheEverything: true },
+  });
+  if (!r.ok) throw new Error("MF stations " + r.status);
+  const text = await r.text(); // CSV: Id_station;Id_omm;Nom_usuel;Latitude;Longitude;Altitude;...
+  const list = [];
+  for (const line of text.trim().split(/\r?\n/).slice(1)) {
+    const c = line.split(";");
+    const lat = parseFloat(c[3]),
+      lon = parseFloat(c[4]);
+    if (isFinite(lat) && isFinite(lon)) list.push({ id: c[0], nom: c[2], lat, lon, pack: c[7] || "" });
+  }
+  _mfStations = { list, exp: now + 86400 };
+  return list;
+}
+
+function nearestStation(stations, lat, lon) {
+  let best = null,
+    bestD = Infinity;
+  for (const s of stations) {
+    // equirectangular approximation — fine for "nearest" ranking
+    const dLat = s.lat - lat,
+      dLon = (s.lon - lon) * Math.cos((lat * Math.PI) / 180);
+    const d = dLat * dLat + dLon * dLon;
+    if (d < bestD) {
+      bestD = d;
+      best = s;
+    }
+  }
+  if (!best) return null;
+  const km = Math.round(Math.sqrt(bestD) * 111 * 10) / 10;
+  return { ...best, distance_km: km };
+}
+
+async function weatherHandler(req, env, origin) {
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  const url = new URL(req.url);
+  const lat = parseFloat(url.searchParams.get("lat"));
+  const lon = parseFloat(url.searchParams.get("lon"));
+  if (!isFinite(lat) || !isFinite(lon)) return json({ error: "lat & lon required" }, 400, origin);
+
+  const out = { observed: null, forecast: null };
+
+  // --- Météo-France: nearest station + latest observation (best-effort) ---
+  if (env.METEOFRANCE_APPLICATION_ID) {
+    try {
+      const stations = await getMfStations(env);
+      // Prefer RADOME stations — they carry the real-time 6-min feed (rr_per, t, u). ETENDU /
+      // CIRAD stations are often closer but report null in infrahoraire-6m.
+      const radome = stations.filter((s) => /RADOME/i.test(s.pack));
+      const st = nearestStation(radome.length ? radome : stations, lat, lon);
+      if (st) {
+        const token = await getMeteoFranceToken(env);
+        const or = await fetch(
+          `${MF_BASE}/DPObs/v1/station/infrahoraire-6m?id_station=${encodeURIComponent(st.id)}&format=json`,
+          { headers: { authorization: `Bearer ${token}` } }
+        );
+        if (or.ok) {
+          const oj = await or.json();
+          const o = Array.isArray(oj) ? oj[oj.length - 1] : oj;
+          out.observed = {
+            source: "Météo-France",
+            station: st.nom,
+            station_id: st.id,
+            distance_km: st.distance_km,
+            time: o?.validity_time || null,
+            rain_mm: o?.rr_per ?? null,
+            temp_c: o?.t != null ? Math.round((o.t - 273.15) * 10) / 10 : null,
+            humidity_pct: o?.u ?? null,
+            wind_ms: o?.ff ?? null,
+          };
+        }
+      }
+    } catch (e) {
+      out.observed = { error: e.message };
+    }
+  }
+
+  // --- Open-Meteo: precipitation forecast + soil moisture + ET0 → water balance ---
+  try {
+    const om = await fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+        `&daily=precipitation_sum,et0_fao_evapotranspiration&hourly=soil_moisture_3_to_9cm` +
+        `&past_days=3&forecast_days=7&timezone=auto`
+    );
+    if (om.ok) {
+      const j = await om.json();
+      const days = (j.daily?.time || []).map((date, i) => {
+        const precip = j.daily.precipitation_sum?.[i] ?? null;
+        const et0 = j.daily.et0_fao_evapotranspiration?.[i] ?? null;
+        return {
+          date,
+          precip_mm: precip,
+          et0_mm: et0,
+          water_balance_mm: precip != null && et0 != null ? Math.round((precip - et0) * 10) / 10 : null,
+        };
+      });
+      const sm = j.hourly?.soil_moisture_3_to_9cm || [];
+      const smLatest = sm.length ? sm[sm.length - 1] : null;
+      out.forecast = {
+        source: "Open-Meteo",
+        days,
+        soil_moisture_m3m3: smLatest,
+        soil_moisture_depth: "3-9cm",
+      };
+    }
+  } catch (e) {
+    out.forecast = { error: e.message };
+  }
+
+  return json(out, 200, origin);
+}
+
+// ============================================================================
+// Rain alerts — Web Push (VAPID + RFC 8291 aes128gcm). The scheduled() cron polls the
+// Open-Meteo forecast for each subscriber's parcels and pushes when rain ≥ threshold is
+// coming. Public key below ships to the SPA (config.js VAPID_PUBLIC_KEY); the matching
+// private scalar is the Worker secret VAPID_PRIVATE_KEY.
+// ============================================================================
+const VAPID_PUBLIC_KEY = "BM8aw9vXzVz3Zz2vHzwBYIE-DtzaI8rXXE-D3qKkARciYdeJHYANsD35fnapqNSlXHNG4npu7_Wv6qcxItF7Jj4";
+const VAPID_SUBJECT = "mailto:benoit@solven.eu";
+
+function concatBytes(...arrs) {
+  const len = arrs.reduce((a, b) => a + b.length, 0);
+  const out = new Uint8Array(len);
+  let o = 0;
+  for (const a of arrs) {
+    out.set(a, o);
+    o += a.length;
+  }
+  return out;
+}
+
+async function importVapidSigningKey(env) {
+  const pub = b64urlDecodeBytes(VAPID_PUBLIC_KEY); // 0x04 || x(32) || y(32)
+  return crypto.subtle.importKey(
+    "jwk",
+    {
+      kty: "EC",
+      crv: "P-256",
+      d: env.VAPID_PRIVATE_KEY,
+      x: b64urlEncodeBytes(pub.slice(1, 33)),
+      y: b64urlEncodeBytes(pub.slice(33, 65)),
+      ext: true,
+    },
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    ["sign"]
+  );
+}
+
+async function vapidJwt(env, audience) {
+  const key = await importVapidSigningKey(env);
+  const header = b64urlEncodeString(JSON.stringify({ typ: "JWT", alg: "ES256" }));
+  const now = Math.floor(Date.now() / 1000);
+  const payload = b64urlEncodeString(
+    JSON.stringify({ aud: audience, exp: now + 12 * 3600, sub: env.VAPID_SUBJECT || VAPID_SUBJECT })
+  );
+  const data = `${header}.${payload}`;
+  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(data));
+  return `${data}.${b64urlEncodeBytes(new Uint8Array(sig))}`;
+}
+
+async function hkdf(salt, ikm, info, length) {
+  const key = await crypto.subtle.importKey("raw", ikm, "HKDF", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt, info }, key, length * 8);
+  return new Uint8Array(bits);
+}
+
+// Encrypt `plaintext` for a push subscription per RFC 8291 (aes128gcm content-encoding).
+async function encryptPushPayload(subscription, plaintext) {
+  const enc = new TextEncoder();
+  const uaPublic = b64urlDecodeBytes(subscription.keys.p256dh); // 65 bytes
+  const authSecret = b64urlDecodeBytes(subscription.keys.auth); // 16 bytes
+  const server = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const serverPub = new Uint8Array(await crypto.subtle.exportKey("raw", server.publicKey)); // 65 bytes
+  const uaKey = await crypto.subtle.importKey("raw", uaPublic, { name: "ECDH", namedCurve: "P-256" }, false, []);
+  const shared = new Uint8Array(await crypto.subtle.deriveBits({ name: "ECDH", public: uaKey }, server.privateKey, 256));
+
+  const ikm = await hkdf(authSecret, shared, concatBytes(enc.encode("WebPush: info\0"), uaPublic, serverPub), 32);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(salt, ikm, enc.encode("Content-Encoding: aes128gcm\0"), 16);
+  const nonce = await hkdf(salt, ikm, enc.encode("Content-Encoding: nonce\0"), 12);
+
+  const aesKey = await crypto.subtle.importKey("raw", cek, "AES-GCM", false, ["encrypt"]);
+  const record = concatBytes(plaintext, new Uint8Array([2])); // 0x02 = last-record delimiter
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, tagLength: 128 }, aesKey, record)
+  );
+  // header: salt(16) || rs(4, =4096) || idlen(1) || keyid(serverPub,65) || ciphertext
+  const rs = new Uint8Array([0, 0, 0x10, 0]);
+  return concatBytes(salt, rs, new Uint8Array([serverPub.length]), serverPub, ciphertext);
+}
+
+async function sendWebPush(env, subscription, payloadObj) {
+  if (!env.VAPID_PRIVATE_KEY) throw new Error("VAPID_PRIVATE_KEY not configured");
+  const audience = new URL(subscription.endpoint).origin;
+  const jwt = await vapidJwt(env, audience);
+  const body = await encryptPushPayload(subscription, new TextEncoder().encode(JSON.stringify(payloadObj)));
+  return fetch(subscription.endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/octet-stream",
+      "content-encoding": "aes128gcm",
+      ttl: "86400",
+      authorization: `vapid t=${jwt}, k=${VAPID_PUBLIC_KEY}`,
+    },
+    body,
+  });
+}
+
+async function alertsSubscribe(req, env, origin) {
+  if (!env.SHARE_KV) return json({ error: "SHARE_KV not configured" }, 503, origin);
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  let body;
+  try {
+    body = await req.json();
+  } catch (e) {
+    return json({ error: "bad body: " + e.message }, 400, origin);
+  }
+  if (!body?.subscription?.endpoint) return json({ error: "subscription required" }, 400, origin);
+  const rec = {
+    subscription: body.subscription,
+    parcels: Array.isArray(body.parcels)
+      ? body.parcels
+          .slice(0, 50)
+          .map((p) => ({ lat: +p.lat, lon: +p.lon, label: String(p.label || "").slice(0, 60) }))
+          .filter((p) => isFinite(p.lat) && isFinite(p.lon))
+      : [],
+    threshold_mm: Number(body.threshold_mm) || 2,
+    updated_at: new Date().toISOString(),
+    last_alert: {},
+  };
+  await env.SHARE_KV.put(`alerts/${who.accountId}`, JSON.stringify(rec));
+  return json({ ok: true, parcels: rec.parcels.length }, 200, origin);
+}
+
+async function alertsUnsubscribe(req, env, origin) {
+  if (!env.SHARE_KV) return json({ error: "SHARE_KV not configured" }, 503, origin);
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  await env.SHARE_KV.delete(`alerts/${who.accountId}`);
+  return json({ ok: true }, 200, origin);
+}
+
+async function alertsTest(req, env, origin) {
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  if (!env.VAPID_PRIVATE_KEY) return json({ error: "VAPID not configured" }, 503, origin);
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    body = {};
+  }
+  let sub = body.subscription;
+  if (!sub && env.SHARE_KV) {
+    const rec = JSON.parse((await env.SHARE_KV.get(`alerts/${who.accountId}`)) || "null");
+    sub = rec?.subscription;
+  }
+  if (!sub?.endpoint) return json({ error: "no subscription" }, 400, origin);
+  try {
+    const r = await sendWebPush(env, sub, {
+      title: "AgriVision — test 🔔",
+      body: "Les alertes pluie fonctionnent. Tu seras prévenu avant la pluie sur tes parcelles.",
+      tag: "agrivision-test",
+      url: "./",
+    });
+    return json({ ok: r.ok, status: r.status, detail: r.ok ? null : await r.text() }, r.ok ? 200 : 502, origin);
+  } catch (e) {
+    return json({ error: e.message }, 500, origin);
+  }
+}
+
+// Cron: poll the forecast for every subscriber's parcels; push when rain ≥ threshold comes.
+async function runRainAlerts(env) {
+  if (!env.SHARE_KV || !env.VAPID_PRIVATE_KEY) return;
+  let cursor;
+  do {
+    const list = await env.SHARE_KV.list({ prefix: "alerts/", cursor });
+    for (const k of list.keys) {
+      try {
+        const rec = JSON.parse((await env.SHARE_KV.get(k.name)) || "null");
+        if (!rec?.subscription || !rec.parcels?.length) continue;
+        let changed = false;
+        let gone = false;
+        rec.last_alert = rec.last_alert || {};
+        for (const p of rec.parcels) {
+          const fc = await fetchNextRain(p.lat, p.lon);
+          if (!fc || fc.mm < (rec.threshold_mm || 2)) continue;
+          const pkey = `${p.lat.toFixed(3)},${p.lon.toFixed(3)}`;
+          if (rec.last_alert[pkey] === fc.date) continue; // already alerted for this event
+          const r = await sendWebPush(env, rec.subscription, {
+            title: "🌧️ Pluie prévue",
+            body: `${p.label || "Parcelle"} : ~${fc.mm} mm le ${fc.date}`,
+            tag: `rain-${pkey}`,
+            url: "./",
+          });
+          if (r.status === 404 || r.status === 410) {
+            gone = true;
+            break;
+          }
+          rec.last_alert[pkey] = fc.date;
+          changed = true;
+        }
+        if (gone) await env.SHARE_KV.delete(k.name);
+        else if (changed) await env.SHARE_KV.put(k.name, JSON.stringify(rec));
+      } catch {}
+    }
+    cursor = list.list_complete ? null : list.cursor;
+  } while (cursor);
+}
+
+// Next upcoming day (within 2 days) with any forecast rain → { date, mm }.
+async function fetchNextRain(lat, lon) {
+  const r = await fetch(
+    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=precipitation_sum&forecast_days=2&timezone=auto`
+  );
+  if (!r.ok) return null;
+  const j = await r.json();
+  const times = j.daily?.time || [];
+  const pr = j.daily?.precipitation_sum || [];
+  for (let i = 0; i < times.length; i++) {
+    if ((pr[i] || 0) > 0) return { date: times[i], mm: Math.round(pr[i] * 10) / 10 };
+  }
+  return null;
 }
 
 // Default catalog window: last ~6 months up to "now". Date.now() is allowed in the Worker

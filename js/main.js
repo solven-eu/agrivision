@@ -825,6 +825,12 @@ const satellite = createSatellite({
 satellite.render();
 window.satellite = satellite;
 
+// ============ Rain alerts (Web Push) ============
+import { createAlerts } from "./alerts.js";
+const alerts = createAlerts({ getSelectedParcels: () => selectedParcels });
+alerts.render();
+window.alerts = alerts;
+
 // ============ Gamification — "Dossier de culture" completeness score ============
 import { createGamification } from "./gamification.js";
 const dossier = createGamification({
