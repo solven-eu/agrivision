@@ -1,5 +1,72 @@
 # Roadmap
 
+## Satellite imagery (Sentinel-2 / Copernicus) — next phases
+
+Today (v1, shipped): the Worker proxies Copernicus Data Space Ecosystem (CDSE) Sentinel Hub
+APIs (`/api/satellite/catalog` + `/api/satellite/image`, gated on an AgriVision session).
+`js/satellite.js` shows, for the selected parcels, a timeline of available Sentinel-2
+acquisitions (date + cloud cover) and overlays a true-color or NDVI (vigor) image of any
+date on the map, merged with user photo dates into one chronological history. Secrets:
+`CDSE_CLIENT_ID` / `CDSE_CLIENT_SECRET`.
+
+What's missing — add when the value is clearer:
+
+- **v2 — per-parcel clipping + cloud masking.** The image is currently a bbox rectangle. Clip
+  to the parcel polygon (Process API `geometry`) and use the Sentinel-2 SCL/cloud band to
+  reject/blend cloudy pixels so a "clear" pass over a small parcel isn't ruined by a cloud at
+  the bbox edge. Réunion's mi-pente/highlands are frequently cloudy — this matters there.
+- **v3 — NDVI statistics into the AI prompt.** Use the Statistical API to compute a per-parcel
+  mean NDVI (and a short time series) and inject it into the analysis context block, so the
+  model reasons about observed vigor + a sudden drop (disease / cyclone / water stress)
+  instead of inferring everything from the photos. Pairs with the soil + altitude context.
+- **v4 — vigor time-series chart + change detection.** A small per-parcel NDVI-over-time chart;
+  flag acquisitions where mean NDVI dropped > X% vs the trailing median ("alerte vigueur").
+- **v5 — quota accounting.** The Process API consumes CDSE Processing Units. Track per-user
+  satellite usage (KV, like tokens) and surface remaining quota; cache rendered tiles in KV/R2
+  keyed by (bbox, day, index) to avoid re-billing identical views.
+
+## Gamification — guided completeness score to teach the app
+
+**v1 shipped:** `js/gamification.js` renders a "Dossier de culture · N%" ring + expandable
+checklist in the sidebar header, scoring six signals (parcels, mapped-vs-declared surface,
+photo count, photo freshness, photo coverage over parcel polygons, disease-check recency)
+with per-item CTAs that jump to the relevant section. The only new input is an optional
+"surface totale" field. Remaining ideas below (badges, streaks, richer coverage metric).
+
+New users don't know what "good input" looks like, so analyses run on thin data (one blurry
+photo, no disease check) and the result underwhelms. A lightweight, non-patronizing
+gamification layer turns "how do I use this?" into a visible checklist + score that nudges
+the user toward a complete, high-quality culture — and doubles as onboarding.
+
+**A "Dossier de culture" completeness score (0–100)** assembled from signals we already have:
+
+- **Parcelles** — how many selected; **surface sélectionnée vs. surface totale estimée** the
+  user inputs for their exploitation (e.g. "tu as cartographié 3,2 ha sur ~5 ha → 64%").
+  Surface input is a new optional field on the farm/exploitation profile.
+- **Photos — fraîcheur**: how old is the newest / oldest photo? (flag stale: "dernière photo
+  il y a 47 j"). Uses `takenAt`.
+- **Photos — volume**: how many photos? (diminishing returns past ~5–8).
+- **Photos — couverture**: how well do photo positions (lat/lon + FOV cones) cover the
+  selected parcel polygons? A crude metric: % of parcels with ≥1 photo whose position or aim
+  falls inside/near the polygon. Surfaces "2 parcelles sur 3 sans photo".
+- **Diagnostic** — recency of the latest disease check ("dernier contrôle maladies il y a
+  12 j") from the analysis history.
+- **Satellite** — is there a recent clear NDVI pass loaded for the parcels? (ties to the
+  satellite feature).
+
+**UX:**
+
+- A compact ring/score in the sidebar header ("Dossier 64% complet") that expands to the
+  checklist with one-tap CTAs ("➕ Ajoute une photo du coin nord", "🔬 Lance un contrôle
+  maladies"). Each item green/amber/grey.
+- Gentle, never blocking — it's a guide, not a gate. Dismissible.
+- Optional streaks/badges later ("3 cultures suivies ce mois", "couverture photo 100%"),
+  but the first version is just the score + actionable checklist.
+
+**Why:** the score is computed entirely from existing state (parcels, photos, analyses) plus
+one new optional "surface totale" input — cheap to build, high onboarding value, and it
+directly raises analysis quality by steering users to better input.
+
 ## Climate context — dynamic ENSO + seasonal forecast integration
 
 Today (v1, shipped): `js/seasonal-normals.js` carries static 1991-2020 monthly normals for La Réunion (rainfall windward/leeward, temperature, cyclone window) and injects them into every AI call's context block plus a "🗓️ Climatologie locale" card in the sidebar. That covers the "typical seasonality" question — raining seasons, cyclone window, normal temps — and the AI can reason about disease pressure and treatment timing accordingly.

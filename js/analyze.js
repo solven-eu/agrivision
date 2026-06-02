@@ -162,6 +162,9 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
         }
       }
       const merged = { ...(app.getAnalysisCombined() || {}), ...parsed };
+      // Stamp when this analysis ran — used by the "Dossier de culture" completeness score
+      // (disease-check recency) and persisted with the culture.
+      merged.analyzed_at = new Date().toISOString();
       app.setAnalysisCombined(merged);
 
       if (Array.isArray(parsed.photo_tags)) {

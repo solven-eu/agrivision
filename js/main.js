@@ -222,6 +222,11 @@ const parcels = installParcels({
   get updateAnalyzeAvailability() {
     return updateAnalyzeAvailability;
   },
+  // Live photo list (declared below) — used for the 📷-per-parcel count + the parcel sheet.
+  get photos() {
+    return photos;
+  },
+  renderPhotos: () => renderPhotos(),
 });
 const {
   featureKey,
@@ -232,7 +237,13 @@ const {
   updateSelectHint,
   updateLockHint,
   refreshPhotoAssociations,
+  openParcelDetail,
 } = parcels;
+// "Discuter de cette parcelle" (from the on-map parcel sheet) → open chat + send a focused turn.
+window.addEventListener("agrivision:discuss-parcel", (e) => {
+  openChatSection();
+  sendTurn({ kind: "text", text: e.detail?.text || "" });
+});
 // Helper for any place that adds/moves a photo: recompute parcel association + re-render.
 function onPhotosChanged() {
   refreshPhotoAssociations?.();
@@ -796,6 +807,54 @@ window.addEventListener("agrivision:login", () => {
   share.fetchQuota();
 });
 window.addEventListener("agrivision:logout", () => share.render());
+
+// ============ Satellite imagery (Sentinel-2 via Worker → CDSE) ============
+import { createSatellite } from "./satellite.js";
+const satellite = createSatellite({
+  map,
+  getSelectedParcels: () => selectedParcels,
+  getPhotos: () => photos,
+  openPhotos: () => {
+    const el = document.getElementById("photos-section");
+    if (el) {
+      el.open = true;
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  },
+});
+satellite.render();
+window.satellite = satellite;
+
+// ============ Gamification — "Dossier de culture" completeness score ============
+import { createGamification } from "./gamification.js";
+const dossier = createGamification({
+  getSelectedParcels: () => selectedParcels,
+  getPhotos: () => photos,
+  getAnalysisCombined: () => analysisCombined,
+  openSection: (id) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.open = true;
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  },
+});
+dossier.render();
+window.dossier = dossier;
+// Re-render the score when the parcels / photos / analysis panels change — event-driven
+// (debounced MutationObserver), no polling. The dossier writes to its own panel, so there's
+// no observer feedback loop.
+{
+  let t;
+  const bump = () => {
+    clearTimeout(t);
+    t = setTimeout(() => dossier.render(), 250);
+  };
+  for (const id of ["thumbs", "parcel-info", "metrics"]) {
+    const el = document.getElementById(id);
+    if (el) new MutationObserver(bump).observe(el, { childList: true, subtree: true });
+  }
+}
 
 // ============ Dropbox persistence (extracted) ============
 import { createDbx } from "./persistence.js";

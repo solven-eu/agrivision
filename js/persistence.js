@@ -336,6 +336,11 @@ export function createDbx(app) {
         props: p.props,
         geometry: p.geometry,
         latlng: p.latlng,
+        // Persisted enrichments — so a reload (and other devices) skip re-fetching from the
+        // soil / IGN-altimetry / Copernicus APIs. NDVI especially costs CDSE quota.
+        soil: p.soil ?? null,
+        altitude: p.altitude ?? null,
+        ndvi: p.ndvi ?? null,
       })),
       photos: app.photos.map((p) => ({
         id: p.id,
@@ -531,8 +536,14 @@ export function createDbx(app) {
           props: p.props,
           geometry: p.geometry,
           latlng: p.latlng,
-          soil: null,
-          soilFetched: false,
+          // Restore persisted enrichments; the `*Fetched` flags let ensureSoil/ensureAltitude
+          // skip them (only missing ones re-fetch). NDVI has no auto-fetch, so this is the
+          // only thing that restores it without a CDSE call.
+          soil: p.soil ?? null,
+          soilFetched: p.soil != null,
+          altitude: p.altitude ?? null,
+          altitudeFetched: p.altitude != null,
+          ndvi: p.ndvi ?? null,
         });
       }
       // Auto-lock parcels after restore — UX safety only (prevents accidental

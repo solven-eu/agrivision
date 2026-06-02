@@ -14,6 +14,13 @@ FACEBOOK_APP_ID = "26899197766369996"   # must match FACEBOOK_APP_ID in js/confi
 # Required together with FACEBOOK_APP_ID for /api/auth/facebook/login; without it the
 # endpoint returns 503. From https://developers.facebook.com/apps → Settings → Basic.
 
+# Copernicus Data Space (Sentinel-2 satellite imagery). Register a free OAuth client at
+# https://shapps.dataspace.copernicus.eu/dashboard/ (User settings → OAuth clients):
+#   wrangler secret put CDSE_CLIENT_ID
+#   wrangler secret put CDSE_CLIENT_SECRET
+# Without them /api/satellite/* returns 503. For local dev, add both to worker/.dev.vars.
+# Optional [vars] CDSE_BASE to use a commercial Sentinel Hub account instead of CDSE.
+
 # AgriVision session JWT secret. Used to sign HS256 session tokens minted at
 # /api/auth/dropbox/login. Generate with: openssl rand -hex 32
 # Then: wrangler secret put AGRI_JWT_SECRET

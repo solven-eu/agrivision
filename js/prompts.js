@@ -34,6 +34,7 @@ Le contexte que tu reçois CONTIENT déjà, sans que tu aies à demander :
 - **Photos** : EXIF GPS + direction quand disponibles.
 - **Sol typique de la zone** (quand La Réunion + parcelle sélectionnée) : type FAO, pH, CEC, N total, C organique, P, K, Mg, Ca, capacité au champ (pF 2.5), point de flétrissement (pF 4.2). Source : CIRAD/Nature 2026, médianes sur ~5 échantillons à proximité.
 - **Altitude par parcelle** (IGN RGE ALTI 5 m, FR métro + DOM) + indication qualitative d'exposition nuageuse proxy (côte sèche / mi-pente / haute montagne).
+- **Vigueur satellite (NDVI)** quand mesurée : NDVI moyen Sentinel-2 récent par parcelle (0 = sol nu, ~0.3 = clairsemé, ~0.5 = modéré, >0.6 = couvert dense/vigoureux). Recoupe-le avec l'aspect des photos : un NDVI bas alors que la culture devrait être en pleine végétation est un signal de stress (hydrique, maladie, carence) ou de récolte récente ; un NDVI élevé conforte une bonne vigueur. Tiens compte de la date (proche/éloignée des photos) et du fait qu'une parcelle hétérogène a un NDVI moyen trompeur.
 - **Climatologie locale Réunion** (Météo-France 1991-2020) : saison en cours (humide/cyclonique vs sèche/hiver austral), exposition côte au vent / sous le vent, pluies normales du mois, températures normales (ajustées altitude), fenêtre cyclonique (15 nov–15 mai). Statique, toujours disponible quand La Réunion.
 
 → **Quand le bloc "SOL TYPIQUE DE LA ZONE" est présent, INTÈGRE-le dans ton raisonnement** : un cuivre est phytotoxique sous pH 5.5, un mancozèbe ne marche pas sur sol salin (Na haut), un déficit en K limite le rendement banane indépendamment des maladies, une CEC faible signifie qu'on ne peut pas fertiliser massivement en une fois (lessivage), etc.
@@ -325,8 +326,14 @@ export function buildContextBlock(ctx) {
         : "";
       const altTxt =
         p.altitude != null ? ` · alt. ${p.altitude} m (${exposureHintFromAltitude(p.altitude)})` : "";
+      // Satellite vigor — latest Sentinel-2 NDVI mean over the parcel polygon, if measured
+      // (js/satellite.js attaches p.ndvi). An observed-vigor prior the model can reason from.
+      const ndviTxt =
+        p.ndvi?.mean != null
+          ? ` · NDVI ${p.ndvi.mean} (${p.ndvi.label}, Sentinel-2 ${p.ndvi.date})`
+          : "";
       lines.push(
-        `  ${i + 1}. ${label} (code_cultu=${p.props.code_cultu}) · ${a} ha${altTxt} · centre ≈ ${lat0.toFixed(5)},${lon0.toFixed(5)}${p.props.bio === 1 ? " · bio" : ""}${soilLine ? `\n     sol : ${soilLine}` : ""}${fitTxt}`
+        `  ${i + 1}. ${label} (code_cultu=${p.props.code_cultu}) · ${a} ha${altTxt}${ndviTxt} · centre ≈ ${lat0.toFixed(5)},${lon0.toFixed(5)}${p.props.bio === 1 ? " · bio" : ""}${soilLine ? `\n     sol : ${soilLine}` : ""}${fitTxt}`
       );
     });
   } else {

@@ -326,6 +326,17 @@
           </div>
         </div>
 
+        <div
+          id="dossier-panel"
+          style="
+            margin: 6px 0 12px;
+            padding: 10px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--panel2);
+          "
+        ></div>
+
         <h2>1. Adresse</h2>
         <div class="row">
           <input
@@ -447,6 +458,10 @@
           <input id="photo" type="file" accept="image/*" multiple hidden />
           <input id="photo-cam" type="file" accept="image/*" capture="environment" hidden />
           <div id="thumbs" style="display: flex; flex-direction: column; gap: 6px; margin-top: 8px"></div>
+        </details>
+        <details class="advanced" id="satellite-section">
+          <summary>🛰️ Satellite (Sentinel-2)</summary>
+          <div id="satellite-panel" style="margin-top: 6px"></div>
         </details>
         <details class="advanced" id="chat-section">
           <summary>💬 Conversation IA</summary>
@@ -613,6 +628,9 @@
         </div>
       </aside>
       <div id="map"></div>
+
+      <!-- On-map parcel detail sheet — slides in when a parcel is clicked. Populated by parcels.js. -->
+      <div id="parcel-sheet" aria-hidden="true"></div>
 
       <!-- Floating Action Button — visible on mobile only. Defaults to camera capture. -->
       <button id="fab" type="button" aria-label="Action principale">📷</button>

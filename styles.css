@@ -35,6 +35,61 @@ body {
 #map {
   height: 100%;
 }
+/* On-map "Recadrer" button (Leaflet control) — appears when the view drifts from the
+   auto-fit of the selected parcels. */
+.recadrer-btn {
+  background: var(--accent);
+  color: #0a0e13;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 12px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+.recadrer-btn:hover {
+  filter: brightness(1.08);
+}
+
+/* On-map parcel detail sheet — slides in from the right edge of the map, vertically
+   centered to clear the top-right control cluster (compass / layers / recadrer). */
+#parcel-sheet {
+  position: fixed;
+  top: 50%;
+  right: 12px;
+  width: 290px;
+  max-width: calc(100vw - 24px);
+  max-height: 72vh;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  padding: 14px;
+  z-index: 900;
+  transform: translate(120%, -50%);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform 0.22s ease,
+    opacity 0.22s ease;
+}
+#parcel-sheet.open {
+  transform: translate(0, -50%);
+  opacity: 1;
+  pointer-events: auto;
+}
+#parcel-sheet .psheet-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+}
+#parcel-sheet .psheet-row > span:last-child {
+  color: var(--text);
+  text-align: right;
+}
 #drawer-handle {
   display: none;
 }

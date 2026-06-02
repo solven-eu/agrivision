@@ -7,7 +7,7 @@ import { IGN_WFS, RPG_WFS_TYPE } from "./config.js";
 import { CULTU_LABELS, cropMeta, resolveIdentifiedCropMeta } from "./catalog.js";
 import { pointInGeom } from "./util.js";
 import { aggregateParcels, parcelArea } from "./state.js";
-import { fetchSoilAt, renderSoilCard } from "./soil.js";
+import { fetchSoilAt, renderSoilCard, soilSummaryLine } from "./soil.js";
 import { fetchAltitude, exposureHintFromAltitude } from "./elevation.js";
 import { scoreSuitability, colorForScore, evaluateParcel, scoreAllCrops } from "./culture-fit.js";
 import { PLAN_FEATURES } from "./plan-features.js";
@@ -205,6 +205,7 @@ export function installParcels(app) {
             const row = parcelInfoEl.querySelector(`.parcel-row[data-parcel-id="${id}"]`);
             row?.scrollIntoView({ behavior: "smooth", block: "center" });
           }
+          openParcelDetail(id); // inspect mode: show the parcel's detail sheet
           return;
         }
         app.flashLockHint?.();
@@ -239,21 +240,25 @@ export function installParcels(app) {
             parcel.soil = soil;
             parcel.soilFetched = true;
             renderParcelInfoPanel();
+            renderParcelSheet();
           })
           .catch((err) => {
             parcel.soil = { error: err?.message || "unknown" };
             parcel.soilFetched = true;
             renderParcelInfoPanel();
+            renderParcelSheet();
           });
         fetchAltitude(lat, lon)
           .then((alt) => {
             parcel.altitude = alt;
             parcel.altitudeFetched = true;
             renderParcelInfoPanel();
+            renderParcelSheet();
           })
           .catch(() => {
             parcel.altitudeFetched = true;
             renderParcelInfoPanel();
+            renderParcelSheet();
           });
       }
       // Selection changed → re-evaluate which photos sit inside which parcels.
@@ -267,6 +272,9 @@ export function installParcels(app) {
       // re-renders don't reach this code path, so reloads keep everything folded.
       const sec = document.getElementById("parcels-section");
       if (sec && app.selectedParcels.size > 0 && !sec.open) sec.open = true;
+      // Open the detail sheet for a just-selected parcel; close it if this click deselected it.
+      if (app.selectedParcels.has(id)) openParcelDetail(id);
+      else if (sheetParcelId === id) closeParcelDetail();
     } catch (err) {
       parcelInfoEl.innerHTML = `<dt>Erreur</dt><dd>${err.message}</dd>`;
       parcelInfoEl.style.display = "block";
@@ -275,15 +283,29 @@ export function installParcels(app) {
 
   function renderParcelHighlight() {
     parcelHighlight.clearLayers();
+    // Locked = inspection mode: keep the parcel INTERIOR clear (transparent) so satellite
+    // imagery / RPG colors show through, and mark each parcel with an outward-fading glow
+    // (layered translucent strokes) + a crisp edge. Unlocked = selection-building mode:
+    // a green fill makes the picked parcels obvious while you assemble the set.
+    const locked = app.getParcelsLocked?.();
     for (const [pid, p] of app.selectedParcels) {
       const isActive = activeParcelIds.has(pid);
-      // Active parcels get a brighter, thicker BORDER. Fill stays green (same as inactive)
-      // so the highlight doesn't drown out the underlying RPG colors. The border alone is
-      // enough to mark active membership.
-      const style = isActive
-        ? { color: "#fbbf24", weight: 5, fillColor: "#4ade80", fillOpacity: 0.35 }
-        : { color: "#4ade80", weight: 2, fillColor: "#4ade80", fillOpacity: 0.35 };
-      const layer = L.geoJSON(p.geometry, { style }).addTo(parcelHighlight);
+      const edge = isActive ? "#fbbf24" : "#4ade80";
+      let layer;
+      if (locked) {
+        // Halo: widest + faintest underneath → narrower → crisp 2px edge on top. Reads as a
+        // glow hugging the boundary while the inside stays neat.
+        L.geoJSON(p.geometry, { style: { color: edge, weight: 11, opacity: 0.08, fill: false } }).addTo(parcelHighlight);
+        L.geoJSON(p.geometry, { style: { color: edge, weight: 6, opacity: 0.18, fill: false } }).addTo(parcelHighlight);
+        layer = L.geoJSON(p.geometry, { style: { color: edge, weight: isActive ? 3 : 2, opacity: 1, fill: false } }).addTo(parcelHighlight);
+      } else {
+        // Active parcels get a brighter, thicker BORDER. Fill stays green (same as inactive)
+        // so the highlight doesn't drown out the underlying RPG colors.
+        const style = isActive
+          ? { color: "#fbbf24", weight: 5, fillColor: "#4ade80", fillOpacity: 0.35 }
+          : { color: "#4ade80", weight: 2, fillColor: "#4ade80", fillOpacity: 0.35 };
+        layer = L.geoJSON(p.geometry, { style }).addTo(parcelHighlight);
+      }
       const identified = resolveIdentifiedCropMeta(app.getAnalysisCombined()?.identification);
       const meta = identified || cropMeta(p.props?.code_cultu);
       // Effective BIO: user override wins, else fall back to the RPG flag.
@@ -305,20 +327,77 @@ export function installParcels(app) {
         }).addTo(parcelHighlight);
       }
     }
+    // Selection changed (e.g. cleared) — refresh the on-map "Recadrer" visibility.
+    updateRecadrerBtn();
+  }
+
+  // On-map "Recadrer" button — appears only once the user has panned/zoomed away from the
+  // last auto-fit, and snaps the view back to frame the selected parcels.
+  let recadrerCtrl = null;
+  let fitTarget = null; // {center, zoom} captured after the last fit settles
+  let suppressDrift = false; // ignore the programmatic moveend our own fitBounds triggers
+
+  function ensureRecadrerControl() {
+    if (recadrerCtrl) return;
+    const Ctrl = L.Control.extend({
+      options: { position: "topright" },
+      onAdd() {
+        const btn = L.DomUtil.create("button", "recadrer-btn");
+        btn.type = "button";
+        btn.innerHTML = "🎯 Recadrer";
+        btn.title = "Revenir au cadrage automatique des parcelles";
+        btn.style.display = "none";
+        L.DomEvent.disableClickPropagation(btn);
+        L.DomEvent.on(btn, "click", (e) => {
+          L.DomEvent.stop(e);
+          fitToSelectedParcels();
+        });
+        recadrerCtrl = { btn };
+        return btn;
+      },
+    });
+    app.map.addControl(new Ctrl());
+  }
+
+  function isViewDrifted() {
+    if (!fitTarget) return false;
+    if (Math.abs(app.map.getZoom() - fitTarget.zoom) >= 0.75) return true;
+    const p1 = app.map.latLngToContainerPoint(app.map.getCenter());
+    const p2 = app.map.latLngToContainerPoint(fitTarget.center);
+    return p1.distanceTo(p2) > 80; // pixels — scale-aware, intuitive threshold
+  }
+
+  function updateRecadrerBtn() {
+    if (!recadrerCtrl) return;
+    const drifted = app.selectedParcels.size > 0 && !suppressDrift && isViewDrifted();
+    recadrerCtrl.btn.style.display = drifted ? "block" : "none";
   }
 
   function fitToSelectedParcels() {
     if (app.selectedParcels.size === 0) return;
     const b = parcelHighlight.getBounds();
     if (!b.isValid()) return;
+    ensureRecadrerControl();
     const sz = app.map.getSize();
     const padX = Math.round(sz.x * 0.15);
     const padY = Math.round(sz.y * 0.15);
+    suppressDrift = true; // the resulting moveend is ours, not the user's
     app.map.fitBounds(b, {
       paddingTopLeft: [padX, padY],
       paddingBottomRight: [padX, padY],
       animate: true,
     });
+    // Capture the settled view as the new "home", then re-enable drift tracking. A timeout
+    // fallback covers the case where fitBounds didn't move (so no moveend fires).
+    const settle = () => {
+      fitTarget = { center: app.map.getCenter(), zoom: app.map.getZoom() };
+      suppressDrift = false;
+      updateRecadrerBtn(); // hide — we're home
+    };
+    app.map.once("moveend", settle);
+    setTimeout(() => {
+      if (suppressDrift) settle();
+    }, 700);
   }
 
   function renderParcelInfoPanel() {
@@ -440,6 +519,7 @@ export function installParcels(app) {
     document.getElementById("clear-parcels").onclick = () => {
       if (app.getParcelsLocked()) return;
       app.selectedParcels.clear();
+      closeParcelDetail();
       renderParcelHighlight();
       renderParcelInfoPanel();
       updateLockHint();
@@ -449,6 +529,7 @@ export function installParcels(app) {
       const next = !app.getParcelsLocked();
       app.setParcelsLocked(next);
       renderParcelInfoPanel();
+      renderParcelHighlight(); // switch between filled (unlocked) and glow (locked) styling
       updateLockHint();
       if (next) fitToSelectedParcels();
     };
@@ -539,6 +620,7 @@ export function installParcels(app) {
           el.addEventListener("click", () => {
             app.setParcelsLocked(!app.getParcelsLocked());
             renderParcelInfoPanel();
+            renderParcelHighlight(); // filled ↔ glow styling on lock change
             updateLockHint();
           });
           return el;
@@ -560,6 +642,10 @@ export function installParcels(app) {
   }
 
   app.map.on("zoomend", updateSelectHint);
+  // Show/hide the on-map "Recadrer" button as the user drifts from / returns to the auto-fit.
+  app.map.on("moveend zoomend", () => {
+    if (!suppressDrift) updateRecadrerBtn();
+  });
   // First render: show the empty-state in the side panel + the on-map hint.
   setTimeout(() => {
     renderParcelInfoPanel();
@@ -581,6 +667,119 @@ export function installParcels(app) {
     parcelInfoEl.style.display = "block";
   }
 
+  // ===== On-map parcel detail sheet =====
+  // Clicking a parcel opens a slide-in card with its metrics + satellite vigor + a
+  // "Discuter avec l'IA" action scoped to that parcel.
+  let sheetParcelId = null;
+
+  function openParcelDetail(id) {
+    if (!app.selectedParcels.has(id)) return;
+    sheetParcelId = id;
+    renderParcelSheet();
+    const el = document.getElementById("parcel-sheet");
+    if (el) {
+      el.classList.add("open");
+      el.setAttribute("aria-hidden", "false");
+    }
+  }
+
+  function closeParcelDetail() {
+    sheetParcelId = null;
+    const el = document.getElementById("parcel-sheet");
+    if (el) {
+      el.classList.remove("open");
+      el.setAttribute("aria-hidden", "true");
+    }
+  }
+
+  function renderParcelSheet() {
+    const el = document.getElementById("parcel-sheet");
+    if (!el || !sheetParcelId) return;
+    const id = sheetParcelId;
+    const p = app.selectedParcels.get(id);
+    if (!p) return closeParcelDetail();
+    const identified = resolveIdentifiedCropMeta(app.getAnalysisCombined()?.identification);
+    const meta = identified || cropMeta(p.props?.code_cultu);
+    const area = parcelArea(p.props).toFixed(2);
+    const bioMode = app.getBioMode();
+    const isBio = bioMode === "bio" || (bioMode === "auto" && p.props?.bio === 1);
+    const soilLine = soilSummaryLine(p.soil);
+    const fit = scoreSuitability(p.soil, p.props?.code_cultu);
+    const altTxt = p.altitude != null ? `${p.altitude} m · ${exposureHintFromAltitude(p.altitude)}` : null;
+    const photoCount = (app.photos || []).filter((ph) => ph.associatedParcelId === id).length;
+    const locked = app.getParcelsLocked?.();
+    const ndviColor = (m) => (m >= 0.6 ? "var(--accent)" : m >= 0.3 ? "var(--warn)" : "var(--bad)");
+    const ndviRow =
+      p.ndvi?.mean != null
+        ? `<div class="psheet-row"><span>🛰️ NDVI</span><span style="color:${ndviColor(p.ndvi.mean)}">${p.ndvi.mean} · ${p.ndvi.label}</span></div>`
+        : `<button id="psheet-ndvi" class="secondary" style="font-size:11px;padding:5px 8px;margin-top:2px">📊 Mesurer la vigueur (NDVI)</button>`;
+    el.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+        <div style="font-weight:700;font-size:14px">${meta.emoji || "🌱"} ${meta.fr || p.props?.code_cultu || "Parcelle"}</div>
+        <button id="psheet-close" aria-label="Fermer" style="background:none;border:0;color:var(--muted);font-size:18px;cursor:pointer;line-height:1">✕</button>
+      </div>
+      <div class="small" style="color:var(--muted);margin-bottom:8px">code ${p.props?.code_cultu || "?"} · ${area} ha${isBio ? " · 🌱 bio" : ""}</div>
+      <div style="display:flex;flex-direction:column;gap:5px;font-size:12px">
+        ${soilLine ? `<div class="psheet-row"><span>Sol</span><span style="max-width:62%">${soilLine}</span></div>` : ""}
+        ${altTxt ? `<div class="psheet-row"><span>Altitude</span><span>${altTxt}</span></div>` : ""}
+        ${fit ? `<div class="psheet-row"><span>Adéquation sol</span><span style="color:${colorForScore(fit.score)}">${fit.score}% ${fit.label}</span></div>` : ""}
+        <div class="psheet-row"><span>📷 Photos ici</span><span>${photoCount}</span></div>
+        ${ndviRow}
+      </div>
+      <div style="margin-top:12px;display:flex;flex-direction:column;gap:6px">
+        <button id="psheet-discuss" class="primary-capture" style="font-size:13px;padding:8px">💬 Discuter de cette parcelle</button>
+        ${!locked ? `<button id="psheet-remove" class="secondary" style="font-size:11px;padding:4px 8px">Retirer de la sélection</button>` : ""}
+      </div>`;
+    el.querySelector("#psheet-close").onclick = closeParcelDetail;
+    el.querySelector("#psheet-discuss").onclick = () => discussParcel(id);
+    const ndviBtn = el.querySelector("#psheet-ndvi");
+    if (ndviBtn)
+      ndviBtn.onclick = async () => {
+        ndviBtn.textContent = "Mesure en cours…";
+        ndviBtn.disabled = true;
+        try {
+          await window.satellite?.measureParcel?.(p);
+        } finally {
+          renderParcelSheet();
+        }
+      };
+    const rm = el.querySelector("#psheet-remove");
+    if (rm)
+      rm.onclick = () => {
+        app.selectedParcels.delete(id);
+        refreshPhotoAssociations();
+        renderParcelHighlight();
+        renderParcelInfoPanel();
+        app.renderPhotos?.();
+        updateSelectHint();
+        closeParcelDetail();
+      };
+  }
+
+  // Build a parcel-scoped prompt and hand it to the chat (via main.js event listener).
+  function discussParcel(id) {
+    const p = app.selectedParcels.get(id);
+    if (!p) return;
+    const meta = cropMeta(p.props?.code_cultu);
+    const area = parcelArea(p.props).toFixed(2);
+    const bioMode = app.getBioMode();
+    const isBio = bioMode === "bio" || (bioMode === "auto" && p.props?.bio === 1);
+    const soilLine = soilSummaryLine(p.soil);
+    const photoCount = (app.photos || []).filter((ph) => ph.associatedParcelId === id).length;
+    const bits = [`${meta.fr || p.props?.code_cultu} (${area} ha${isBio ? ", bio" : ""})`];
+    if (p.altitude != null) bits.push(`altitude ${p.altitude} m`);
+    if (soilLine) bits.push(`sol : ${soilLine}`);
+    if (p.ndvi?.mean != null) bits.push(`NDVI ${p.ndvi.mean} (${p.ndvi.label})`);
+    bits.push(`${photoCount} photo(s) située(s) dans la parcelle`);
+    const text = `Concentrons-nous sur cette parcelle — ${bits.join(" ; ")}. Donne-moi un diagnostic ciblé (état, risques de maladies, conseils d'intervention) pour CETTE parcelle précisément.`;
+    // Focus the highlight on this parcel.
+    activeParcelIds.clear();
+    activeParcelIds.add(id);
+    renderParcelHighlight();
+    window.dispatchEvent(new CustomEvent("agrivision:discuss-parcel", { detail: { text } }));
+    closeParcelDetail();
+  }
+
   return {
     featureKey,
     toggleParcelAt,
@@ -591,6 +790,8 @@ export function installParcels(app) {
     updateLockHint,
     flashLockHint,
     showZoomTooLowMessage,
+    openParcelDetail,
+    closeParcelDetail,
     // Photo → parcel association (point-in-polygon for v1). Called by main.js after a
     // photo is added, moved, or restored from Dropbox so the parcel row's 📷 N count
     // reflects reality. FOV ray-casting for outside-pointing-at-parcel photos: ROADMAP.

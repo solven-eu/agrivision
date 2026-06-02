@@ -180,21 +180,36 @@ export function createAuth() {
     }
 
     const btn = "font-size:12px;padding:7px 12px;display:flex;align-items:center;gap:8px;justify-content:center;width:240px;border-radius:6px;cursor:pointer";
+    // "Last used" chip (à la Cloudflare) — shown next to the provider the user signed in with
+    // last time, kept across logout to make re-login a one-glance choice.
+    const lastProvider = localStorage.getItem("agri_last_provider");
+    const chip = (p) =>
+      p === lastProvider
+        ? `<span title="Dernière méthode utilisée" style="font-size:9px;padding:2px 7px;border-radius:10px;background:var(--accent);color:#fff;white-space:nowrap">Dernière fois</span>`
+        : "";
+    const row = (inner, p) =>
+      `<div style="display:flex;align-items:center;gap:6px">${inner}${chip(p)}</div>`;
     wrap.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-start">
-        ${GOOGLE_CLIENT_ID ? `<div class="google-signin-btn"></div>` : ""}
+        ${GOOGLE_CLIENT_ID ? row(`<div class="google-signin-btn"></div>`, "google") : ""}
         ${
           FACEBOOK_APP_ID
-            ? `<button class="auth-facebook" style="${btn};background:#1877F2;color:#fff;border:none">
+            ? row(
+                `<button class="auth-facebook" style="${btn};background:#1877F2;color:#fff;border:none">
                  <span style="font-weight:700;font-size:15px">f</span> Continuer avec Facebook
-               </button>`
+               </button>`,
+                "facebook"
+              )
             : ""
         }
         ${
           DROPBOX_APP_KEY
-            ? `<button class="auth-dropbox secondary" style="${btn}">
+            ? row(
+                `<button class="auth-dropbox secondary" style="${btn}">
                  <span style="font-weight:700;color:#0061FF">▼</span> Continuer avec Dropbox
-               </button>`
+               </button>`,
+                "dropbox"
+              )
             : ""
         }
       </div>`;

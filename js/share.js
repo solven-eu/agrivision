@@ -25,7 +25,9 @@ export function shareAttribHeaders() {
   return workerAuthHeader();
 }
 
-function workerAuthHeader() {
+// Authorization header carrying the AgriVision session JWT, or {} when signed out.
+// Exported so other identified features (satellite, etc.) can authenticate to the Worker.
+export function workerAuthHeader() {
   const s = localStorage.getItem("agri_session");
   return s ? { authorization: `Bearer ${s}` } : {};
 }
@@ -92,6 +94,10 @@ async function tradeForSession(path, payload) {
     localStorage.setItem("agri_session", j.agri_session);
     if (j.exp) localStorage.setItem("agri_session_exp", String(j.exp));
     if (j.sub) localStorage.setItem("agri_sub", j.sub);
+    // Remember which provider was used — kept across logout to show a "Dernière connexion"
+    // chip on that button next time (à la Cloudflare's "Last used"). Helps the user pick.
+    const prov = (j.sub || "").split(":")[0];
+    if (prov) localStorage.setItem("agri_last_provider", prov);
     window.dispatchEvent(new CustomEvent("agrivision:login", { detail: { sub: j.sub || null } }));
     return j.agri_session;
   } catch (e) {

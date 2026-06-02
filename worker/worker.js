@@ -22,6 +22,12 @@
 //   POST    /api/auth/refresh        → rotate the session JWT (revokes the presented one)
 //   POST    /api/auth/logout         → revoke the presented session JWT server-side
 //   GET     /api/share/quota        → current user's quota (Bearer required)
+//   GET     /api/share/load          → read back mirrored manifest + photos (Bearer required)
+//   POST    /api/storage/register    → record non-secret storage pointer (Bearer required)
+//   GET     /api/storage/pointer     → fetch storage pointer for the identity (Bearer required)
+//   POST    /api/satellite/catalog   → Sentinel-2 acquisitions over bbox (Bearer required)
+//   POST    /api/satellite/image     → NDVI/true-color PNG for bbox+day (Bearer required)
+//   POST    /api/satellite/statistics→ per-geometry NDVI mean time series (Bearer required)
 //   GET     /api/share/status       → last sync info (Bearer required)
 //   POST    /api/share/save         → mirror manifest + photos into KV (Bearer required)
 //   DELETE  /api/share/account      → purge user's data from KV (Bearer required)
@@ -42,11 +48,16 @@
 //   STRIPE_WEBHOOK_SECRET   (set via: wrangler secret put STRIPE_WEBHOOK_SECRET)
 //   FACEBOOK_APP_SECRET     (set via: wrangler secret put FACEBOOK_APP_SECRET) — our app's
 //                            secret, used to verify FB access_tokens. Not a user secret.
+//   CDSE_CLIENT_ID          (set via: wrangler secret put CDSE_CLIENT_ID) — Copernicus Data
+//                            Space OAuth client id for Sentinel-2 imagery.
+//   CDSE_CLIENT_SECRET      (set via: wrangler secret put CDSE_CLIENT_SECRET) — its secret.
 //
 // Optional environment:
 //   ALLOWED_ORIGIN          (defaults to "*"; set to your hosting origin to lock it down)
 //   GOOGLE_CLIENT_ID        (pins the accepted `aud` on Google id_tokens; recommended in prod)
 //   FACEBOOK_APP_ID         (our Facebook app id; required for /api/auth/facebook/login)
+//   CDSE_BASE               (defaults to CDSE Sentinel Hub; set to services.sentinel-hub.com
+//                            for a commercial Sentinel Hub account)
 
 const ALLOWED_HEADERS = "content-type,anthropic-version,authorization";
 const MAX_BODY_BYTES = 25 * 1024 * 1024; // 25 MB cap (several large images + context)
@@ -75,6 +86,18 @@ const OIDC_PROVIDERS = {
     acceptedIssuers: ["https://accounts.google.com", "accounts.google.com"],
   },
 };
+
+// Copernicus Data Space Ecosystem (CDSE) — free Sentinel Hub-compatible APIs for Sentinel-2
+// imagery. OAuth2 client-credentials (our credentials, server-side only). Override the base
+// via env CDSE_BASE to point at commercial Sentinel Hub (services.sentinel-hub.com) instead.
+const CDSE = {
+  token: "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
+  base: "https://sh.dataspace.copernicus.eu",
+  collection: "sentinel-2-l2a",
+};
+// In-isolate token cache (client-credentials token, ~10 min TTL). Persists across requests
+// within a warm isolate; a cold isolate just re-mints. We never store it durably.
+let _cdseToken = { value: null, exp: 0 };
 
 // Per-tier quotas & feature flags are imported from the SHARED config that the SPA also
 // reads. Single source of truth — the Worker is the trust boundary that enforces, the SPA
@@ -600,6 +623,20 @@ export default {
     // GET /api/storage/pointer — fetch that pointer for the signed-in identity.
     if (url.pathname === "/api/storage/pointer" && req.method === "GET") {
       return storagePointer(req, env, origin);
+    }
+
+    // POST /api/satellite/catalog — list available Sentinel-2 acquisitions (dates + cloud
+    // cover) over a bbox/date-range. Powers the parcel timeline. Logged-in feature.
+    if (url.pathname === "/api/satellite/catalog" && req.method === "POST") {
+      return satelliteCatalog(req, env, origin);
+    }
+    // POST /api/satellite/image — render an NDVI / true-color PNG for a bbox + date.
+    if (url.pathname === "/api/satellite/image" && req.method === "POST") {
+      return satelliteImage(req, env, origin);
+    }
+    // POST /api/satellite/statistics — per-geometry NDVI mean time series (vigor).
+    if (url.pathname === "/api/satellite/statistics" && req.method === "POST") {
+      return satelliteStatistics(req, env, origin);
     }
 
     // GET /api/vigicrues-stations — scrapes the donnees.php menu structure,
@@ -1265,6 +1302,236 @@ async function shareLoad(req, env, origin) {
 }
 
 // ============================================================================
+// Satellite imagery (Copernicus / Sentinel-2 via CDSE Sentinel Hub APIs).
+// Secrets: CDSE_CLIENT_ID + CDSE_CLIENT_SECRET (OUR credentials — register a free
+// OAuth client at https://shapps.dataspace.copernicus.eu/dashboard/ ). Both routes
+// require a signed-in AgriVision session (the Process API consumes CDSE quota).
+// ============================================================================
+async function getCdseToken(env) {
+  if (!env.CDSE_CLIENT_ID || !env.CDSE_CLIENT_SECRET) throw new Error("CDSE credentials not configured");
+  const now = Math.floor(Date.now() / 1000);
+  if (_cdseToken.value && _cdseToken.exp - 30 > now) return _cdseToken.value;
+  const r = await fetch(env.CDSE_TOKEN_URL || CDSE.token, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: env.CDSE_CLIENT_ID,
+      client_secret: env.CDSE_CLIENT_SECRET,
+    }),
+  });
+  if (!r.ok) throw new Error("CDSE token " + r.status);
+  const j = await r.json();
+  _cdseToken = { value: j.access_token, exp: now + (j.expires_in || 600) };
+  return _cdseToken.value;
+}
+
+function cdseBase(env) {
+  return (env.CDSE_BASE || CDSE.base).replace(/\/$/, "");
+}
+
+// Evalscripts (Sentinel Hub v3). true-color = natural; ndvi = vigor ramp (brown→green).
+const EVALSCRIPTS = {
+  truecolor: `//VERSION=3
+function setup(){return {input:["B02","B03","B04"],output:{bands:3}};}
+function evaluatePixel(s){return [2.5*s.B04,2.5*s.B03,2.5*s.B02];}`,
+  ndvi: `//VERSION=3
+function setup(){return {input:["B04","B08"],output:{bands:3}};}
+function evaluatePixel(s){
+  let n=(s.B08-s.B04)/(s.B08+s.B04);
+  if(n<0.0) return [0.30,0.45,0.70];      // water / bare
+  if(n<0.2) return [0.78,0.60,0.40];      // soil
+  if(n<0.4) return [0.95,0.90,0.40];      // sparse
+  if(n<0.6) return [0.55,0.80,0.25];      // moderate
+  return [0.10,0.55,0.12];                // dense / vigorous
+}`,
+};
+
+async function satelliteCatalog(req, env, origin) {
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  if (!env.CDSE_CLIENT_ID) return json({ error: "satellite not configured" }, 503, origin);
+  let body;
+  try {
+    body = await req.json();
+  } catch (e) {
+    return json({ error: "bad body: " + e.message }, 400, origin);
+  }
+  const { bbox, datetime, maxCloud = 100 } = body || {};
+  if (!Array.isArray(bbox) || bbox.length !== 4) return json({ error: "bbox [w,s,e,n] required" }, 400, origin);
+  try {
+    const token = await getCdseToken(env);
+    const r = await fetch(`${cdseBase(env)}/api/v1/catalog/1.0.0/search`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        collections: [env.CDSE_COLLECTION || CDSE.collection],
+        bbox,
+        datetime: datetime || defaultDatetimeRange(),
+        limit: 100,
+      }),
+    });
+    if (!r.ok) return json({ error: "catalog " + r.status, detail: await r.text() }, 502, origin);
+    const j = await r.json();
+    // Normalize features → compact acquisition list, filter by cloud, newest first.
+    const acquisitions = (j.features || [])
+      .map((f) => ({
+        id: f.id,
+        date: f.properties?.datetime || null,
+        cloud: f.properties?.["eo:cloud_cover"] ?? null,
+      }))
+      .filter((a) => a.date && (a.cloud == null || a.cloud <= maxCloud))
+      .sort((a, b) => (a.date < b.date ? 1 : -1));
+    // Collapse to one entry per day (a bbox can intersect multiple tiles same day).
+    const seen = new Set();
+    const daily = [];
+    for (const a of acquisitions) {
+      const day = a.date.slice(0, 10);
+      if (seen.has(day)) continue;
+      seen.add(day);
+      daily.push({ ...a, day });
+    }
+    return json({ acquisitions: daily }, 200, origin);
+  } catch (e) {
+    return json({ error: e.message }, 502, origin);
+  }
+}
+
+async function satelliteImage(req, env, origin) {
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  if (!env.CDSE_CLIENT_ID) return json({ error: "satellite not configured" }, 503, origin);
+  let body;
+  try {
+    body = await req.json();
+  } catch (e) {
+    return json({ error: "bad body: " + e.message }, 400, origin);
+  }
+  const { bbox, day, index = "truecolor", width = 512, height = 512 } = body || {};
+  if (!Array.isArray(bbox) || bbox.length !== 4) return json({ error: "bbox [w,s,e,n] required" }, 400, origin);
+  if (!day) return json({ error: "day (YYYY-MM-DD) required" }, 400, origin);
+  const evalscript = EVALSCRIPTS[index] || EVALSCRIPTS.truecolor;
+  const w = Math.min(Math.max(parseInt(width, 10) || 512, 64), 2048);
+  const h = Math.min(Math.max(parseInt(height, 10) || 512, 64), 2048);
+  try {
+    const token = await getCdseToken(env);
+    const r = await fetch(`${cdseBase(env)}/api/v1/process`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "image/png" },
+      body: JSON.stringify({
+        input: {
+          bounds: { bbox, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } },
+          data: [
+            {
+              type: env.CDSE_COLLECTION || CDSE.collection,
+              dataFilter: {
+                timeRange: { from: `${day}T00:00:00Z`, to: `${day}T23:59:59Z` },
+                mosaickingOrder: "leastCC",
+              },
+              // Interpolate the 10 m pixels (vs default nearest-neighbour blocks) so the
+              // rendered overlay looks smooth rather than pixelated. Doesn't add real detail.
+              processing: { upsampling: "BICUBIC", downsampling: "BICUBIC" },
+            },
+          ],
+        },
+        output: { width: w, height: h, responses: [{ identifier: "default", format: { type: "image/png" } }] },
+        evalscript,
+      }),
+    });
+    if (!r.ok) return json({ error: "process " + r.status, detail: await r.text() }, 502, origin);
+    // Pass the PNG straight through with CORS headers.
+    return new Response(r.body, {
+      status: 200,
+      headers: { ...corsHeaders(origin), "content-type": "image/png", "cache-control": "private, max-age=86400" },
+    });
+  } catch (e) {
+    return json({ error: e.message }, 502, origin);
+  }
+}
+
+// Default catalog window: last ~6 months up to "now". Date.now() is allowed in the Worker
+// runtime (unlike workflow scripts).
+function defaultDatetimeRange() {
+  const to = new Date();
+  const from = new Date(to.getTime() - 183 * 24 * 3600 * 1000);
+  return `${from.toISOString()}/${to.toISOString()}`;
+}
+
+// NDVI mean time series over a parcel geometry — the agronomic "vigor" signal. Uses the
+// Sentinel Hub Statistical API: it aggregates per interval, masking clouds/no-data, and
+// returns per-interval mean/min/max/stDev. We normalize to a compact series + the latest
+// valid interval, which the SPA attaches to the parcel and injects into the AI prompt.
+const NDVI_STATS_EVALSCRIPT = `//VERSION=3
+function setup(){return {input:[{bands:["B04","B08","SCL","dataMask"]}],output:[{id:"ndvi",bands:1},{id:"dataMask",bands:1}]};}
+function evaluatePixel(s){
+  // mask clouds/shadows/snow/water via the scene classification band
+  var bad=[3,8,9,10,11], valid = s.dataMask===1 && bad.indexOf(s.SCL)<0 ? 1:0;
+  var n=(s.B08-s.B04)/(s.B08+s.B04);
+  return {ndvi:[n], dataMask:[valid]};
+}`;
+
+async function satelliteStatistics(req, env, origin) {
+  const who = await resolveAccount(req, env);
+  if (who.error) return json({ error: who.error }, who.status, origin);
+  if (!env.CDSE_CLIENT_ID) return json({ error: "satellite not configured" }, 503, origin);
+  let body;
+  try {
+    body = await req.json();
+  } catch (e) {
+    return json({ error: "bad body: " + e.message }, 400, origin);
+  }
+  const { geometry, from, to, intervalDays = 30 } = body || {};
+  if (!geometry?.type) return json({ error: "geometry (GeoJSON) required" }, 400, origin);
+  const now = new Date();
+  const toD = to ? new Date(to) : now;
+  const fromD = from ? new Date(from) : new Date(toD.getTime() - 120 * 24 * 3600 * 1000);
+  try {
+    const token = await getCdseToken(env);
+    const r = await fetch(`${cdseBase(env)}/api/v1/statistics`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({
+        input: {
+          bounds: { geometry, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } },
+          data: [{ type: env.CDSE_COLLECTION || CDSE.collection, dataFilter: {} }],
+        },
+        aggregation: {
+          timeRange: { from: fromD.toISOString(), to: toD.toISOString() },
+          aggregationInterval: { of: `P${Math.max(1, parseInt(intervalDays, 10) || 30)}D` },
+          // Bounds CRS is EPSG:4326, so resx/resy are in DEGREES. ~0.00009° ≈ 10 m at
+          // Réunion's latitude → genuine ~10 m Sentinel-2 pixels, not a 1-pixel collapse.
+          resx: 0.00009,
+          resy: 0.00009,
+          evalscript: NDVI_STATS_EVALSCRIPT,
+        },
+        calculations: { ndvi: { statistics: { default: {} } } },
+      }),
+    });
+    if (!r.ok) return json({ error: "statistics " + r.status, detail: await r.text() }, 502, origin);
+    const j = await r.json();
+    const series = (j.data || [])
+      .map((d) => {
+        const st = d.outputs?.ndvi?.bands?.B0?.stats || {};
+        const valid = (st.sampleCount || 0) - (st.noDataCount || 0);
+        return {
+          from: d.interval?.from || null,
+          to: d.interval?.to || null,
+          mean: valid > 0 ? +Number(st.mean).toFixed(3) : null,
+          min: valid > 0 ? +Number(st.min).toFixed(3) : null,
+          max: valid > 0 ? +Number(st.max).toFixed(3) : null,
+          valid,
+        };
+      })
+      .filter((p) => p.mean != null)
+      .sort((a, b) => (a.from < b.from ? -1 : 1));
+    const latest = series.length ? series[series.length - 1] : null;
+    return json({ series, latest }, 200, origin);
+  } catch (e) {
+    return json({ error: e.message }, 502, origin);
+  }
+}
+
+// ============================================================================
 // Billing (Stripe). Secret: STRIPE_SECRET_KEY (test/live). Webhook secret:
 // STRIPE_WEBHOOK_SECRET (set after creating the webhook endpoint in Stripe).
 // Per-user plan persisted at share/<sub>/plan.json:
@@ -1689,8 +1956,9 @@ async function billingCheckout(req, env, origin) {
   p.append("line_items[0][quantity]", "1");
   p.append("success_url", body.success_url || "https://example.com/?billing=success");
   p.append("cancel_url", body.cancel_url || "https://example.com/?billing=cancel");
-  // SEPA DD + CB + cards auto-displayed based on customer's country. No dashboard toggle required.
-  p.append("automatic_payment_methods[enabled]", "true");
+  // Don't set payment_method_types: Checkout then auto-shows the methods enabled in the
+  // Stripe Dashboard (CB, SEPA, etc.) based on the customer's country. Note:
+  // `automatic_payment_methods` is a PaymentIntent param and is INVALID on Checkout Sessions.
   p.append("client_reference_id", who.accountId);
   p.append("metadata[agri_sub]", who.accountId);
   p.append("metadata[tier]", tier);
