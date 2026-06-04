@@ -993,6 +993,23 @@ function _refreshClimateCard() {
 document
   .getElementById("climate-section")
   ?.addEventListener("toggle", (e) => e.target.open && _refreshClimateCard());
+
+// ============ Weather / water (💧) — Météo-France obs + Open-Meteo forecast ============
+import { createWeather } from "./weather.js";
+function _weatherPoint() {
+  if (selectedParcels.size > 0) {
+    const first = selectedParcels.values().next().value;
+    if (first?.latlng) return { lat: first.latlng[0], lon: first.latlng[1] };
+  }
+  if (currentAddress?.lat != null) return { lat: currentAddress.lat, lon: currentAddress.lon };
+  return null;
+}
+const weather = createWeather({ getPoint: _weatherPoint });
+window.weather = weather; // exposed so buildContextBlock can inject it into the AI context
+// Lazy: fetch + render only when the user opens the section (an MF call per refresh).
+document
+  .getElementById("weather-section")
+  ?.addEventListener("toggle", (e) => e.target.open && weather.ensureForSelection());
 document.getElementById("events-refresh")?.addEventListener("click", () => {
   events.refresh();
   vigicrues.render();

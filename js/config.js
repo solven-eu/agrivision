@@ -35,13 +35,26 @@ export const DROPBOX_REDIRECT_URI = "";
 //
 // Google: create an OAuth 2.0 Client ID (type "Web application") at
 //   https://console.cloud.google.com/apis/credentials
-//   - Authorized JavaScript origins: your hosting origin (+ http://localhost:<port> for dev)
-//   - The same value must be set on the Worker as GOOGLE_CLIENT_ID to pin the token audience.
+//   - Authorized JavaScript origins: every origin the app is served from, e.g.
+//       https://solven.eu            (the origin — NO path, NO trailing slash)
+//       http://localhost:8000        (your dev port)
+//   - Authorized redirect URIs: the exact page the OAuth popup returns to, e.g.
+//       https://solven.eu/agrivision/   (must match GOOGLE_REDIRECT_URI below, incl. trailing slash)
+//       http://localhost:8000/          (or whatever index.html is served at in dev)
+//   - The same Client ID must be set on the Worker as GOOGLE_CLIENT_ID to pin the token audience.
+// We use the OAuth 2.0 redirect flow (response_type=id_token) with prompt=select_account so the
+// user always gets the account chooser — the older Google Identity Services button auto-picked
+// the single signed-in account and could not be forced to ask.
 // Leave empty to hide the "Sign in with Google" button.
 // This client's settings:
 //   https://console.cloud.google.com/auth/clients/634422093981-od2rmhdjqaiof1uhb3glj6oi0e6lrkcu.apps.googleusercontent.com?project=agrivision-498206
 export const GOOGLE_CLIENT_ID =
   "634422093981-od2rmhdjqaiof1uhb3glj6oi0e6lrkcu.apps.googleusercontent.com";
+// Where Google sends the OAuth popup back. MUST be registered verbatim as an Authorized
+// redirect URI on the client above. Used only when its origin matches the page's origin
+// (i.e. in production on solven.eu); on any other origin (localhost dev) the app falls back
+// to this page's own URL — so register BOTH this and your dev URL as redirect URIs.
+export const GOOGLE_REDIRECT_URI = "https://solven.eu/agrivision/";
 
 // Facebook: create an app at https://developers.facebook.com/apps (product: Facebook Login).
 //   - Add your origin under "Allowed Domains for the JavaScript SDK".

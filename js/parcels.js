@@ -681,6 +681,11 @@ export function installParcels(app) {
       el.classList.add("open");
       el.setAttribute("aria-hidden", "false");
     }
+    // Fetch field weather (cached) so the 💧 row fills in; re-render the sheet when it lands.
+    window.weather
+      ?.ensureForSelection?.()
+      .then(() => sheetParcelId === id && renderParcelSheet())
+      .catch(() => {});
   }
 
   function closeParcelDetail() {
@@ -713,6 +718,17 @@ export function installParcels(app) {
       p.ndvi?.mean != null
         ? `<div class="psheet-row"><span>🛰️ NDVI</span><span style="color:${ndviColor(p.ndvi.mean)}">${p.ndvi.mean} · ${p.ndvi.label}</span></div>`
         : `<button id="psheet-ndvi" class="secondary" style="font-size:11px;padding:5px 8px;margin-top:2px">📊 Mesurer la vigueur (NDVI)</button>`;
+    // Field weather (regional) — shown when js/weather.js has fetched it.
+    let weatherRow = "";
+    const wx = typeof window !== "undefined" ? window.weather?.getWeather?.() : null;
+    if (wx?.forecast) {
+      const sm = wx.forecast.soil_moisture_m3m3 != null ? `${Math.round(wx.forecast.soil_moisture_m3m3 * 100)}% sol` : "";
+      const next = (wx.forecast.days || []).slice(-7).find((d) => (d.precip_mm || 0) >= 2);
+      const rain = next
+        ? `pluie ${next.precip_mm} mm ${new Date(next.date + "T12:00").toLocaleDateString("fr-FR", { day: "2-digit", month: "short" })}`
+        : "pas de pluie prévue";
+      weatherRow = `<div class="psheet-row"><span>💧 Eau</span><span style="max-width:62%">${rain}${sm ? ` · ${sm}` : ""}</span></div>`;
+    }
     el.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
         <div style="font-weight:700;font-size:14px">${meta.emoji || "🌱"} ${meta.fr || p.props?.code_cultu || "Parcelle"}</div>
@@ -725,6 +741,7 @@ export function installParcels(app) {
         ${fit ? `<div class="psheet-row"><span>Adéquation sol</span><span style="color:${colorForScore(fit.score)}">${fit.score}% ${fit.label}</span></div>` : ""}
         <div class="psheet-row"><span>📷 Photos ici</span><span>${photoCount}</span></div>
         ${ndviRow}
+        ${weatherRow}
       </div>
       <div style="margin-top:12px;display:flex;flex-direction:column;gap:6px">
         <button id="psheet-discuss" class="primary-capture" style="font-size:13px;padding:8px">💬 Discuter de cette parcelle</button>

@@ -10,7 +10,7 @@
 // AgriVision-minted HMAC JWT (`agri_session`); the IdP proof is traded for it server-side
 // (see worker.js /api/auth/<provider>/login and share.js trade* helpers).
 
-import { GOOGLE_CLIENT_ID, FACEBOOK_APP_ID, DROPBOX_APP_KEY } from "./config.js";
+import { GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI, FACEBOOK_APP_ID, DROPBOX_APP_KEY } from "./config.js";
 import {
   tradeGoogleIdTokenForSession,
   tradeFacebookTokenForSession,
@@ -49,21 +49,60 @@ const PROVIDER_LABEL = {
   facebook: "Facebook",
 };
 
-// ---- Lazy SDK loaders (only fetched when the panel actually needs them) ----
-let googleSdkPromise = null;
-function loadGoogleSdk() {
-  if (googleSdkPromise) return googleSdkPromise;
-  googleSdkPromise = new Promise((resolve, reject) => {
-    if (window.google?.accounts?.id) return resolve(window.google);
-    const s = document.createElement("script");
-    s.src = "https://accounts.google.com/gsi/client";
-    s.async = true;
-    s.onload = () => resolve(window.google);
-    s.onerror = () => reject(new Error("Google SDK failed to load"));
-    document.head.appendChild(s);
-  });
-  return googleSdkPromise;
+// ---- Google OAuth 2.0 redirect flow (popup) ----------------------------------------------
+// We deliberately do NOT use Google Identity Services (the one-tap / rendered button): that
+// flow silently reuses the single signed-in account and cannot be forced to show the account
+// chooser. Instead we open the classic OAuth 2.0 authorization endpoint in a popup with
+// `prompt=select_account` and `response_type=id_token`. Google sends the popup back to our
+// redirect_uri with the id_token in the URL fragment; the popup (same origin = same app)
+// postMessages it to the opener and closes. No client secret, no Worker changes — the id_token
+// is verified server-side exactly as before (/api/auth/google/login).
+const GOOGLE_MSG = "agri:google-auth";
+
+// The exact URI Google returns to. Use the configured production value only when its origin
+// matches the page we're on; otherwise fall back to this page's own URL so localhost dev
+// keeps working (register both as Authorized redirect URIs).
+function googleRedirectUri() {
+  if (GOOGLE_REDIRECT_URI) {
+    try {
+      if (new URL(GOOGLE_REDIRECT_URI).origin === location.origin) return GOOGLE_REDIRECT_URI;
+    } catch {}
+  }
+  return location.origin + location.pathname;
 }
+
+function randomToken() {
+  const a = new Uint8Array(16);
+  crypto.getRandomValues(a);
+  return Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Runs on every page load. If THIS window is the OAuth popup coming back from Google, the URL
+// fragment carries the id_token — hand it to the opener and close. No-op for the normal app.
+function maybeCompleteGooglePopup() {
+  if (!window.opener || window.opener === window) return;
+  const frag = location.hash.startsWith("#") ? location.hash.slice(1) : "";
+  if (!frag) return;
+  const p = new URLSearchParams(frag);
+  if (!p.has("id_token") && !p.has("error")) return; // not our OAuth return
+  try {
+    window.opener.postMessage(
+      {
+        type: GOOGLE_MSG,
+        id_token: p.get("id_token") || null,
+        state: p.get("state") || null,
+        error: p.get("error") || null,
+      },
+      location.origin
+    );
+  } catch {}
+  // Scrub the token out of the URL bar before the (best-effort) close.
+  try {
+    history.replaceState(null, "", location.pathname + location.search);
+  } catch {}
+  window.close();
+}
+maybeCompleteGooglePopup();
 
 let fbSdkPromise = null;
 function loadFacebookSdk(appId) {
@@ -96,31 +135,91 @@ export function createAuth() {
     return MOUNT_IDS.map((id) => document.getElementById(id)).filter(Boolean);
   }
 
-  async function onGoogleCredential(response) {
-    const idToken = response?.credential;
-    if (!idToken) return;
+  // Open Google's account chooser in a popup and wait for the id_token to come back via
+  // postMessage (see maybeCompleteGooglePopup). `prompt=select_account` guarantees the chooser
+  // even when a single Google account is signed in. `nonce` + `state` are minted per attempt:
+  // state guards the postMessage round-trip, nonce ties the returned id_token to this request.
+  async function loginWithGoogle() {
+    if (!GOOGLE_CLIENT_ID) return;
+    const nonce = randomToken();
+    const state = randomToken();
+    // Stash for the popup-blocked fallback: a full-page redirect loses the closure below, so
+    // handleGoogleRedirectReturn() re-reads these on the way back in.
+    sessionStorage.setItem("g_nonce", nonce);
+    sessionStorage.setItem("g_state", state);
+    const params = new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      redirect_uri: googleRedirectUri(),
+      response_type: "id_token",
+      scope: "openid email profile",
+      nonce,
+      state,
+      prompt: "select_account",
+    });
+    const url = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
+    const popup = window.open(url, "agri_google_login", "width=480,height=640,menubar=no,toolbar=no");
+    if (!popup) {
+      // Popup blocked — fall back to a full-page redirect (still forces select_account).
+      location.assign(url);
+      return;
+    }
+
+    const idToken = await new Promise((resolve) => {
+      function cleanup() {
+        window.removeEventListener("message", onMsg);
+        clearInterval(timer);
+      }
+      function onMsg(ev) {
+        if (ev.origin !== location.origin || ev.data?.type !== GOOGLE_MSG) return;
+        cleanup();
+        if (ev.data.error || ev.data.state !== state) return resolve(null);
+        resolve(ev.data.id_token || null);
+      }
+      window.addEventListener("message", onMsg);
+      // If the user closes the popup without finishing, stop waiting.
+      const timer = setInterval(() => {
+        if (popup.closed) {
+          cleanup();
+          resolve(null);
+        }
+      }, 500);
+    });
+    if (!idToken) return; // cancelled, blocked, or state mismatch
+    sessionStorage.removeItem("g_state");
+    await completeGoogleLogin(idToken, nonce);
+  }
+
+  // Trade a freshly returned Google id_token for an AgriVision session, after a defence-in-depth
+  // nonce check. The Worker still does the real (signature + audience) verification.
+  async function completeGoogleLogin(idToken, expectedNonce) {
+    const claims = decodeJwtPayload(idToken);
+    if (expectedNonce && claims?.nonce && claims.nonce !== expectedNonce) {
+      console.warn("google: nonce mismatch, ignoring id_token");
+      return;
+    }
+    sessionStorage.removeItem("g_nonce");
     await tradeGoogleIdTokenForSession(idToken, GOOGLE_CLIENT_ID);
     render(); // login event also fires, but re-render immediately for snappiness
   }
 
-  // Render the official Google button into a container. GIS needs a visible container with
-  // a real width, so we (re)mount on every render — including when the tutorial page that
-  // holds the container becomes visible.
-  async function mountGoogleButton(container) {
-    if (!GOOGLE_CLIENT_ID || !container) return;
+  // Popup-blocked fallback path: when loginWithGoogle had to do a full-page redirect, Google
+  // brings the WHOLE tab back here with the id_token in the fragment and no window.opener.
+  // Consume it on load. (The normal popup case is handled by maybeCompleteGooglePopup above.)
+  async function handleGoogleRedirectReturn() {
+    if (window.opener && window.opener !== window) return; // that's the popup, not us
+    const frag = location.hash.startsWith("#") ? location.hash.slice(1) : "";
+    if (!frag) return;
+    const p = new URLSearchParams(frag);
+    const idToken = p.get("id_token");
+    if (!idToken) return;
+    const ok = p.get("state") && p.get("state") === sessionStorage.getItem("g_state");
+    // Scrub the token (and error/state) out of the URL bar regardless of outcome.
     try {
-      const google = await loadGoogleSdk();
-      google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: onGoogleCredential });
-      container.innerHTML = "";
-      google.accounts.id.renderButton(container, {
-        theme: "outline",
-        size: "large",
-        text: "signin_with",
-        width: 240,
-      });
-    } catch (e) {
-      container.textContent = "Google indisponible";
-    }
+      history.replaceState(null, "", location.pathname + location.search);
+    } catch {}
+    if (!ok) return;
+    sessionStorage.removeItem("g_state");
+    await completeGoogleLogin(idToken, sessionStorage.getItem("g_nonce"));
   }
 
   async function loginWithFacebook() {
@@ -148,10 +247,8 @@ export function createAuth() {
   }
 
   async function signOut() {
-    // Best-effort: also clear the Google one-tap auto-select so the next sign-in is explicit.
-    try {
-      window.google?.accounts?.id?.disableAutoSelect?.();
-    } catch {}
+    // Google sign-in already forces the account chooser every time (prompt=select_account),
+    // so there's no auto-select state to clear here — just drop our session.
     await logoutSession();
     render();
   }
@@ -191,7 +288,16 @@ export function createAuth() {
       `<div style="display:flex;align-items:center;gap:6px">${inner}${chip(p)}</div>`;
     wrap.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-start">
-        ${GOOGLE_CLIENT_ID ? row(`<div class="google-signin-btn"></div>`, "google") : ""}
+        ${
+          GOOGLE_CLIENT_ID
+            ? row(
+                `<button class="auth-google secondary" style="${btn};background:#fff;color:#3c4043;border:1px solid #dadce0">
+                 <span style="font-weight:700;color:#4285F4">G</span> Continuer avec Google
+               </button>`,
+                "google"
+              )
+            : ""
+        }
         ${
           FACEBOOK_APP_ID
             ? row(
@@ -213,9 +319,9 @@ export function createAuth() {
             : ""
         }
       </div>`;
+    wrap.querySelector(".auth-google")?.addEventListener("click", loginWithGoogle);
     wrap.querySelector(".auth-facebook")?.addEventListener("click", loginWithFacebook);
     wrap.querySelector(".auth-dropbox")?.addEventListener("click", loginWithDropbox);
-    mountGoogleButton(wrap.querySelector(".google-signin-btn"));
   }
 
   // When signed in but this device has no local storage connection (no dbx_token), tell the
@@ -274,6 +380,9 @@ export function createAuth() {
   // also mints a session, or a session is traded in another tab listener).
   window.addEventListener("agrivision:login", render);
   window.addEventListener("agrivision:logout", render);
+
+  // If we landed here from a popup-blocked full-page Google redirect, finish the login.
+  handleGoogleRedirectReturn();
 
   return { render, signOut, isLoggedIn: () => !!currentSession() };
 }

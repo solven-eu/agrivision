@@ -74,7 +74,8 @@ progress · ⬜ planned (see [`ROADMAP.md`](./ROADMAP.md)).
 | **Combined-strategy disease modelling** | multiplicative loss across diseases/treatments | ✅ |
 | **Soil-fit scoring** | crop requirements × parcel soil | ✅ |
 | **Soil-aware treatment caveats** | e.g. cuivre phytotoxic < pH 5.5, mancozèbe on saline soil | ✅ |
-| **Water balance** | forecast rain − ET0; soil moisture for irrigation timing | ✅ (data ready; AI wiring 🟡) |
+| **Water balance** | forecast rain − ET0; soil moisture for irrigation timing | ✅ (card + AI context + per-parcel sheet) |
+| **Rain alerts** | Web Push (VAPID) — cron polls forecast, notifies before rain ≥ 2 mm/day on a parcel | ✅ (delivery validates on deploy) |
 | **Climatology-aware reasoning** | static Réunion normals (saison, cyclone window) in prompt | ✅ |
 | **Per-parcel focused AI discussion** | parcel sheet → scoped chat turn | ✅ |
 | **Time-series** | NDVI monthly series + photo timeline (camera; drone-ready) | ✅ |

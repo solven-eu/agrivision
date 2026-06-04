@@ -6,6 +6,7 @@ import { CULTU_LABELS } from "./catalog.js";
 import { soilContextBlock, soilSummaryLine } from "./soil.js";
 import { exposureHintFromAltitude } from "./elevation.js";
 import { climateContextBlock } from "./seasonal-normals.js";
+import { weatherSummaryLine } from "./weather.js";
 import { scoreSuitability } from "./culture-fit.js";
 
 export const SYSTEM_PROMPT = `MISSION ET LIMITES STRICTES (non-négociables)
@@ -291,6 +292,12 @@ export function buildContextBlock(ctx) {
   const altForClimate = firstParcelForClimate?.altitude ?? null;
   const climate = climateContextBlock(today, lat, lon, altForClimate);
   if (climate) lines.push("\n" + climate);
+  // Live weather / water — observed rain (Météo-France) + forecast precip, water balance and
+  // soil moisture (Open-Meteo). Fetched lazily by js/weather.js; injected when available so
+  // the model reasons about current humidity/rain windows (fungal pressure, treatment timing).
+  const weather = ctx.weather ?? (typeof window !== "undefined" ? window.weather?.getWeather?.() : null);
+  const wline = weatherSummaryLine(weather);
+  if (wline) lines.push(`\nEAU / MÉTÉO (temps réel) : ${wline}`);
   // Soil context — derived from the first selected parcel's cached lookup. The parcels
   // module pre-fetches soil data on selection (via fetchSoilAt) and attaches it to the
   // parcel object. If present, it's a small "SOL TYPIQUE DE LA ZONE" block with the

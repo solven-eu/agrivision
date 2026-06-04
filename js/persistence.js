@@ -146,11 +146,19 @@ export function createDbx(app) {
       code_challenge: challenge,
       code_challenge_method: "S256",
       token_access_type: "offline",
-      // OpenID Connect: requesting `openid` gets us an id_token (JWT) in the token response.
-      // The JWT's `sub` claim is the user's stable Dropbox account_id, so the Worker can
-      // identify the user by signature-verifying the JWT — no need to forward the bearer.
-      // The app must have the `openid` scope enabled in the Dropbox App console too.
-      scope: "openid",
+      // Scopes. When `scope` is passed, Dropbox grants EXACTLY these (intersected with the
+      // app's enabled permissions), and rejects the whole request if any isn't enabled — so we
+      // list only what we actually use AND have enabled in the console:
+      //   openid + email   → id_token (JWT). Dropbox rejects `openid` alone: it must be paired
+      //                      with at least one of profile/email. The JWT's `sub` is the stable
+      //                      account_id the Worker verifies (no bearer forwarded).
+      //   files.metadata.read → files/list_folder (auto-enabled alongside files.content.read)
+      //   files.content.read  → files/download
+      //   files.content.write → files/upload, files/delete_v2
+      // NOTE: users/get_current_account (storage pointer) needs `account_info.read`; it's left
+      // out so login doesn't fail when that scope isn't enabled — the pointer is best-effort and
+      // degrades silently. Re-add `account_info.read` here once it's enabled in the console.
+      scope: "openid email files.metadata.read files.content.read files.content.write",
     });
     if (DROPBOX_REDIRECT_URI) params.set("redirect_uri", DROPBOX_REDIRECT_URI);
     const url = `https://www.dropbox.com/oauth2/authorize?${params}`;
