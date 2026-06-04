@@ -623,6 +623,28 @@ document.getElementById("ver").textContent = [...crypto.getRandomValues(new Uint
   .map((b) => b.toString(16).padStart(2, "0"))
   .join("");
 
+// Bottom banner offering to reload into a newly-installed SW. Self-contained (no toast lib).
+function showUpdateBanner(onReload) {
+  if (document.getElementById("sw-update-banner")) return; // already showing
+  const bar = document.createElement("div");
+  bar.id = "sw-update-banner";
+  bar.style.cssText =
+    "position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:10050;" +
+    "background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;" +
+    "padding:10px 14px;display:flex;align-items:center;gap:12px;font-size:13px;max-width:92vw;" +
+    "box-shadow:0 4px 16px rgba(0,0,0,.4)";
+  bar.innerHTML =
+    `<span>🆕 Nouvelle version disponible.</span>` +
+    `<button id="sw-update-reload" style="font-size:12px;padding:6px 12px">Recharger</button>` +
+    `<button id="sw-update-dismiss" class="secondary" style="font-size:12px;padding:6px 10px">Plus tard</button>`;
+  document.body.appendChild(bar);
+  bar.querySelector("#sw-update-reload").onclick = () => {
+    bar.remove();
+    onReload();
+  };
+  bar.querySelector("#sw-update-dismiss").onclick = () => bar.remove();
+}
+
 // PWA: register service worker, but NEVER on localhost (stale-cache hell during dev).
 // Also: if a SW was previously registered on this origin, unregister it.
 const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/.test(location.hostname);
@@ -634,7 +656,35 @@ if ("serviceWorker" in navigator) {
     // Also clear all caches it may have populated.
     if (window.caches) caches.keys().then((keys) => keys.forEach((k) => caches.delete(k)));
   } else if (location.protocol !== "file:") {
-    navigator.serviceWorker.register("./sw.js").catch((e) => console.warn("SW reg failed:", e));
+    // Reload exactly once, and only when WE accepted an update (not on first-install claim).
+    let updateAccepted = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (updateAccepted) location.reload();
+    });
+    // updateViaCache:"none" → the browser bypasses the HTTP cache when checking sw.js, so a new
+    // deploy is detected on the next visit regardless of host cache headers (GitHub Pages, etc.).
+    navigator.serviceWorker
+      .register("./sw.js", { updateViaCache: "none" })
+      .then((reg) => {
+        const offerWaiting = (worker) => {
+          if (!worker) return;
+          showUpdateBanner(() => {
+            updateAccepted = true;
+            worker.postMessage({ type: "SKIP_WAITING" });
+          });
+        };
+        // A new SW that finished installing on a previous visit and is parked in "waiting".
+        if (reg.waiting && navigator.serviceWorker.controller) offerWaiting(reg.waiting);
+        // A new SW discovered during this session.
+        reg.addEventListener("updatefound", () => {
+          const nw = reg.installing;
+          nw?.addEventListener("statechange", () => {
+            // Prompt only on an UPDATE (a controller already exists), never on first install.
+            if (nw.state === "installed" && navigator.serviceWorker.controller) offerWaiting(nw);
+          });
+        });
+      })
+      .catch((e) => console.warn("SW reg failed:", e));
   }
 }
 
@@ -670,13 +720,16 @@ if (_laborRateEl) {
 
 // Tutorial modal — shows on first visit (skippable, persisted in localStorage).
 // Reachable later via the hamburger menu in case the user wants to re-see it.
-function showTutorial() {
+function showTutorial(opts = {}) {
   const modal = document.getElementById("tutorial-modal");
   if (!modal) return;
-  let page = 1;
   // Pages are discovered from the DOM so adding/removing a .tuto-page slide needs no JS edit.
   const pages = Array.from(modal.querySelectorAll(".tuto-page"));
   const total = pages.length;
+  // Returning, logged-out users jump straight to the login slide; first-timers see the full
+  // walk-through (whose last slide is the login panel anyway).
+  const loginIdx = pages.findIndex((el) => el?.id === "tuto-page-login");
+  let page = opts.startAtLogin && loginIdx >= 0 ? loginIdx + 1 : 1;
   const dots = document.getElementById("tuto-dots");
   const prev = document.getElementById("tuto-prev");
   const next = document.getElementById("tuto-next");
@@ -700,7 +753,10 @@ function showTutorial() {
   function close() {
     modal.style.display = "none";
     localStorage.setItem("agri_tutorial_seen", "1");
+    window.removeEventListener("agrivision:login", close);
   }
+  // Signing in from inside the modal dismisses it automatically.
+  window.addEventListener("agrivision:login", close);
   prev?.addEventListener("click", () => {
     if (page > 1) {
       page--;
@@ -722,11 +778,15 @@ function showTutorial() {
   render();
   modal.style.display = "flex";
 }
-if (!localStorage.getItem("agri_tutorial_seen")) {
-  // Small delay so it doesn't fight with the page initial paint / geolocation prompts.
-  setTimeout(showTutorial, 400);
-}
 window.showTutorial = showTutorial; // exposed so the hamburger can re-launch it
+// On every load, offer login — unless already signed in. First visit shows the full tutorial
+// (its last slide is the login panel); later logged-out visits jump straight to that slide.
+// Small delay so it doesn't fight with the page initial paint / geolocation prompts, and so
+// `window.auth` (created lower in this module) exists by the time the callback runs.
+setTimeout(() => {
+  if (window.auth?.isLoggedIn?.()) return;
+  showTutorial({ startAtLogin: !!localStorage.getItem("agri_tutorial_seen") });
+}, 400);
 
 // Handle Stripe Checkout return URL: ?billing=success → toast + refetch the user's
 // plan/quota so the new tier appears immediately in the share panel.

@@ -226,12 +226,16 @@ export function createAuth() {
     if (!FACEBOOK_APP_ID) return;
     try {
       const FB = await loadFacebookSdk(FACEBOOK_APP_ID);
+      // The FB SDK rejects an async function as the callback ("Expression is of type
+      // asyncfunction, not function"), so the callback must be plain — it kicks off the async
+      // token trade without awaiting.
       FB.login(
-        async (response) => {
+        (response) => {
           const token = response?.authResponse?.accessToken;
           if (!token) return; // user cancelled or not authorized
-          await tradeFacebookTokenForSession(token);
-          render();
+          tradeFacebookTokenForSession(token)
+            .then(render)
+            .catch((e) => console.warn("facebook session trade failed:", e.message));
         },
         { scope: "public_profile,email" }
       );

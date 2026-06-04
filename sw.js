@@ -1,6 +1,11 @@
-// AgriVision service worker — cache-first for app shell + same-origin assets.
-// Bump CACHE_VERSION on app updates.
-const CACHE_VERSION = "agriv-v2";
+// AgriVision service worker — resource-aware caching:
+//   • navigations (HTML) → network-first (fresh on deploy, cached fallback offline)
+//   • app code (js/css)  → stale-while-revalidate (instant + self-refreshing, no version bump)
+//   • everything else    → cache-first (icons, versioned libs, tiles — effectively immutable)
+// A new SW waits (no auto-skipWaiting) until the page asks it to activate via SKIP_WAITING,
+// so the user gets an "update ready" prompt instead of a surprise mid-session swap.
+// Bump CACHE_VERSION only for a hard purge (e.g. a breaking cache-shape change).
+const CACHE_VERSION = "agriv-v6";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -19,8 +24,10 @@ const APP_SHELL = [
 ];
 
 self.addEventListener("install", (event) => {
+  // Precache the shell as the offline fallback. Do NOT skipWaiting here — the new SW stays in
+  // "waiting" until the page sends SKIP_WAITING (see below), which powers the update prompt.
+  // (First install has nothing to wait behind, so it activates immediately anyway.)
   event.waitUntil(caches.open(CACHE_VERSION).then((c) => c.addAll(APP_SHELL)));
-  self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
@@ -30,6 +37,12 @@ self.addEventListener("activate", (event) => {
       .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k))))
   );
   self.clients.claim();
+});
+
+// The page calls this (on user "Recharger") to swap the waiting SW in immediately. The page's
+// controllerchange listener then reloads into the new version.
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
 });
 
 // ===== Web Push (rain alerts) — fires even when the app is closed =====
@@ -68,12 +81,51 @@ self.addEventListener("fetch", (event) => {
   // Only handle GET. Let API/POST requests pass through unchanged.
   if (req.method !== "GET") return;
   const url = new URL(req.url);
-  // Don't cache cross-origin API calls (Anthropic, IGN, Dropbox, BAN, Wikipedia, iNat).
+  // Don't touch cross-origin API calls (Anthropic, IGN, Dropbox, BAN, Wikipedia, iNat).
   // Cache cross-origin static libs (Leaflet, exifr, suncalc) opportunistically.
   const isStaticLib = /(unpkg\.com|jsdelivr\.net|tile\.openstreetmap)/.test(url.hostname);
   const sameOrigin = url.origin === self.location.origin;
   if (!sameOrigin && !isStaticLib) return;
 
+  // 1) Navigations (the HTML document) → network-first: a fresh deploy is picked up while
+  //    online; if offline, fall back to the precached shell so the app still boots.
+  if (req.mode === "navigate") {
+    event.respondWith(
+      fetch(req)
+        .then((res) => {
+          const clone = res.clone();
+          caches.open(CACHE_VERSION).then((c) => c.put("./index.html", clone));
+          return res;
+        })
+        .catch(() =>
+          caches.match("./index.html").then((c) => c || caches.match("./"))
+        )
+    );
+    return;
+  }
+
+  // 2) Same-origin app code (js/css) → stale-while-revalidate: serve the cached copy instantly,
+  //    refetch in the background and update the cache so the NEXT load is fresh. This is what
+  //    lets a deploy propagate without bumping CACHE_VERSION.
+  if (sameOrigin && /\.(?:js|mjs|css)$/.test(url.pathname)) {
+    event.respondWith(
+      caches.open(CACHE_VERSION).then((cache) =>
+        cache.match(req).then((cached) => {
+          const network = fetch(req)
+            .then((res) => {
+              if (res.ok) cache.put(req, res.clone());
+              return res;
+            })
+            .catch(() => cached);
+          return cached || network; // cached → instant; else wait for network
+        })
+      )
+    );
+    return;
+  }
+
+  // 3) Everything else (icons, fonts, versioned libs, map tiles) → cache-first; these are
+  //    effectively immutable, so the network is only hit on a cache miss.
   event.respondWith(
     caches.match(req).then((cached) => {
       if (cached) return cached;
