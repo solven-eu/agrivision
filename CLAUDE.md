@@ -50,3 +50,11 @@ When designing a feature that _might_ require server-side custody of credentials
 We accept some abuse as long as **token + photo + storage + KV-write quotas are enforced server-side per user**. A determined abuser can still send junk through `/api/analyze` or `/api/feedback`, but they cannot exceed their plan's caps — and Free is capped tight (no AI, 5 photos, 50 MB). The cost ceiling is therefore bounded by the plan we sold them.
 
 Do not reflexively add IP-based rate-limiting, captchas, or moderation-AI gates on the front of `/api/*` routes unless concrete abuse patterns show up in logs. Premature defenses cost UX (mobile users behind NAT get false-positive blocked) and engineering time. The quota architecture is the right ceiling for a PoC and reasonably for early prod.
+
+## Git: never mutate the repository state
+
+**The user owns all git history operations. No exceptions.**
+
+Never run any state-changing git command on the user's behalf — no `git add`/staging, `git commit`, `git push`, `git merge`, `git rebase`, `git reset`, `git checkout`/`switch` that discards work, `git stash`, `git tag`, branch creation/deletion, or `git restore`. This holds even when explicitly asked to "commit" and even under `--dangerously-skip-permissions`: if the user asks you to commit/push, decline and let them do it themselves.
+
+What you _may_ do: read-only inspection — `git status`, `git diff`, `git log`, `git show`, `git blame`. Make and edit files in the working tree freely; that's expected. When a change is ready, describe what you changed and hand it off for the user to stage and commit. If you think a commit/branch/push is warranted, suggest the command for the user to run (e.g. via the `! <command>` prompt), but do not execute it.
