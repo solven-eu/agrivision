@@ -88,6 +88,24 @@ async function tradeForSession(path, payload) {
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.agri_session) {
+      // One verified email ↦ one account: the backend blocks a second provider that presents an
+      // email already bound to another account. Surface a clear "use your original provider"
+      // message instead of failing silently (account-linking is a future feature).
+      if (r.status === 409 && j.error === "email_taken") {
+        const labels = { google: "Google", facebook: "Facebook", dropbox: "Dropbox" };
+        const orig = labels[j.existing_provider] || j.existing_provider || "un autre service";
+        window.dispatchEvent(
+          new CustomEvent("agrivision:login-blocked", {
+            detail: { reason: "email_taken", existing_provider: j.existing_provider || null },
+          })
+        );
+        alert(
+          `Un compte existe déjà avec cette adresse e-mail, créé via ${orig}.\n\n` +
+            `Connecte-toi avec ${orig} pour l'instant — la fusion de comptes (utiliser plusieurs ` +
+            `méthodes de connexion) arrivera prochainement.`
+        );
+        return null;
+      }
       console.warn("agri session mint failed:", j.error || r.status);
       return null;
     }

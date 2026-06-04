@@ -24,9 +24,12 @@ export const MISTRAL_MODEL = "pixtral-12b-2409";
 //   - Copy the App key here (no client secret needed, PKCE flow).
 // This app's settings: https://www.dropbox.com/developers/apps/info/rimf9kjv2vhki4j
 export const DROPBOX_APP_KEY = "rimf9kjv2vhki4j";
-// Optional: set to a hosted https URL once you deploy. If empty, the app uses
-// the manual code-paste flow (works from file:// and any hosting).
-export const DROPBOX_REDIRECT_URI = "";
+// Hosted https URL Dropbox redirects back to after authorization. MUST be registered verbatim
+// under the app's OAuth 2 → "Redirect URIs". Used only when its origin matches the page's
+// origin (production); on any other origin (localhost/file://) the app falls back to the manual
+// code-paste flow. Register both this and any dev URL you use.
+//   Console: https://www.dropbox.com/developers/apps/info/rimf9kjv2vhki4j → OAuth 2 → Redirect URIs
+export const DROPBOX_REDIRECT_URI = "https://www.solven.eu/agrivision/";
 
 // === Social identity providers (login only — no storage) ===
 // These authenticate the user to the AgriVision backend (quota, billing, sharing).

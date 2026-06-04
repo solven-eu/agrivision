@@ -14,6 +14,45 @@ import {
 import { ensureSoilForSelected } from "./soil.js";
 import { ensureAltitudeForSelected } from "./elevation.js";
 
+// Dropbox OAuth round-trip back to our app. Use the configured redirect only when its origin
+// matches the page (production); otherwise return null so the caller uses the manual code-paste
+// flow (localhost / file://, where this URL isn't registered). Mirrors googleRedirectUri().
+const DBX_MSG = "agri:dropbox-auth";
+function dropboxRedirectUri() {
+  if (DROPBOX_REDIRECT_URI) {
+    try {
+      if (new URL(DROPBOX_REDIRECT_URI).origin === location.origin) return DROPBOX_REDIRECT_URI;
+    } catch {}
+  }
+  return null;
+}
+
+// Runs on every page load. If THIS window is the OAuth popup returning from Dropbox, the auth
+// code is in the query string (?code=…) — hand it to the opener (which holds the PKCE verifier)
+// and close. No-op for the normal app. Dropbox uses ?code (query); Google uses #id_token
+// (fragment), so the two popup completers never collide.
+function maybeCompleteDropboxPopup() {
+  if (!window.opener || window.opener === window) return;
+  const q = new URLSearchParams(location.search);
+  if (!q.has("code") && !q.has("error")) return;
+  try {
+    window.opener.postMessage(
+      {
+        type: DBX_MSG,
+        code: q.get("code") || null,
+        state: q.get("state") || null,
+        error: q.get("error") || null,
+      },
+      location.origin
+    );
+  } catch {}
+  try {
+    history.replaceState(null, "", location.pathname);
+  } catch {}
+  window.close();
+}
+maybeCompleteDropboxPopup();
+
 /**
  * @param {object} app - dependency bundle:
  *   - Direct refs (mutated in place):
@@ -34,6 +73,7 @@ export function createDbx(app) {
     token: "dbx_token",
     refresh: "dbx_refresh",
     verifier: "dbx_verifier",
+    state: "dbx_state",
     session: "agri_culture_id",
     crop: "agri_culture_crop",
     uploaded: "agri_uploaded_photos", // photoId → true (per culture)
@@ -160,9 +200,79 @@ export function createDbx(app) {
       // degrades silently. Re-add `account_info.read` here once it's enabled in the console.
       scope: "openid email files.metadata.read files.content.read files.content.write",
     });
-    if (DROPBOX_REDIRECT_URI) params.set("redirect_uri", DROPBOX_REDIRECT_URI);
+    const redirectUri = dropboxRedirectUri();
+
+    // No registered redirect for this origin (localhost / file://) → manual code-paste flow:
+    // open Dropbox's code page in a new tab; the panel shows a paste box. Returns {manual:true}
+    // so the caller reveals that box.
+    if (!redirectUri) {
+      const url = `https://www.dropbox.com/oauth2/authorize?${params}`;
+      window.open(url, "_blank", "noopener");
+      return { manual: true };
+    }
+
+    // Seamless flow: Dropbox redirects a popup back to our app with ?code, the popup
+    // postMessages it here (maybeCompleteDropboxPopup), and we exchange it — no paste needed.
+    params.set("redirect_uri", redirectUri);
+    const state = randomVerifier();
+    sessionStorage.setItem(LS.state, state);
+    params.set("state", state);
     const url = `https://www.dropbox.com/oauth2/authorize?${params}`;
-    window.open(url, "_blank", "noopener");
+    // No "noopener" — the popup needs window.opener to hand the code back.
+    const popup = window.open(url, "agri_dropbox_login", "width=560,height=720");
+    if (!popup) {
+      // Popup blocked → full-page redirect (handled on return by handleDropboxRedirectReturn).
+      location.assign(url);
+      return { manual: false, redirected: true };
+    }
+
+    const code = await new Promise((resolve) => {
+      function cleanup() {
+        window.removeEventListener("message", onMsg);
+        clearInterval(timer);
+      }
+      function onMsg(ev) {
+        if (ev.origin !== location.origin || ev.data?.type !== DBX_MSG) return;
+        cleanup();
+        if (ev.data.error || ev.data.state !== state) return resolve(null);
+        resolve(ev.data.code || null);
+      }
+      window.addEventListener("message", onMsg);
+      const timer = setInterval(() => {
+        if (popup.closed) {
+          cleanup();
+          resolve(null);
+        }
+      }, 500);
+    });
+    sessionStorage.removeItem(LS.state);
+    if (!code) return { manual: false }; // cancelled / blocked / state mismatch
+    await exchangeCode(code);
+    renderPanel();
+    schedule(); // initial save
+    return { manual: false, done: true };
+  }
+
+  // Popup-blocked fallback: Dropbox brought the whole tab back with ?code and no opener. The
+  // PKCE verifier survives in this tab's sessionStorage, so finish the exchange here.
+  async function handleDropboxRedirectReturn() {
+    if (window.opener && window.opener !== window) return; // that's the popup, not us
+    const q = new URLSearchParams(location.search);
+    const code = q.get("code");
+    if (!code) return;
+    const okState = q.get("state") && q.get("state") === sessionStorage.getItem(LS.state);
+    try {
+      history.replaceState(null, "", location.pathname);
+    } catch {}
+    if (!okState) return;
+    sessionStorage.removeItem(LS.state);
+    try {
+      await exchangeCode(code);
+      renderPanel();
+      schedule();
+    } catch (e) {
+      console.warn("dropbox redirect exchange failed:", e.message);
+    }
   }
 
   async function exchangeCode(code) {
@@ -174,7 +284,10 @@ export function createDbx(app) {
       client_id: DROPBOX_APP_KEY,
       code_verifier: verifier,
     });
-    if (DROPBOX_REDIRECT_URI) body.set("redirect_uri", DROPBOX_REDIRECT_URI);
+    // Must match the redirect_uri sent to /authorize (Dropbox enforces this). dropboxRedirectUri()
+    // returns the same value the authorize step used, or null in the manual-paste flow.
+    const redirectUri = dropboxRedirectUri();
+    if (redirectUri) body.set("redirect_uri", redirectUri);
     const r = await fetch("https://api.dropboxapi.com/oauth2/token", {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -820,10 +933,23 @@ export function createDbx(app) {
         <div id="dbx-msg" class="small" style="margin-top:6px"></div>
       `;
       document.getElementById("dbx-connect").onclick = async () => {
-        await startAuth();
-        document.getElementById("dbx-code-row").style.display = "block";
-        document.getElementById("dbx-msg").textContent =
-          "Autoriser dans l'onglet Dropbox puis coller le code ici.";
+        const msg = document.getElementById("dbx-msg");
+        try {
+          msg.textContent = "Ouverture de Dropbox…";
+          const res = await startAuth();
+          if (res?.manual) {
+            // file:// / localhost: no registered redirect → reveal the paste box.
+            document.getElementById("dbx-code-row").style.display = "block";
+            msg.textContent = "Autoriser dans l'onglet Dropbox puis coller le code ici.";
+          } else if (res?.done) {
+            renderPanel(); // connected via popup — exchange already happened
+          } else {
+            // popup closed/cancelled or redirecting; nothing pasted, nothing connected
+            msg.textContent = res?.redirected ? "Redirection vers Dropbox…" : "";
+          }
+        } catch (e) {
+          msg.textContent = "Erreur : " + e.message;
+        }
       };
       document.getElementById("dbx-submit").onclick = async () => {
         const code = document.getElementById("dbx-code").value.trim();
@@ -946,6 +1072,9 @@ export function createDbx(app) {
     }
   }
   renderPanel();
+  // If we came back from a popup-blocked full-page Dropbox redirect (?code in the URL), finish
+  // the exchange now. No-op in the normal case and inside the popup (handled separately).
+  handleDropboxRedirectReturn();
   // `connect` exposes the Dropbox OAuth flow so other UI (the login panel / tutorial) can
   // start it without owning the dbx-panel button.
   return {

@@ -534,6 +534,14 @@ export default {
         // (avoids forcing every caller to know the value during the PoC).
         const claims = await verifyOidcIdToken(body.id_token, OIDC_PROVIDERS.dropbox, body.client_id || null);
         const sub = `dropbox:${claims.sub}`;
+        const anchor = await resolveEmailAnchor(env, {
+          sub,
+          provider: "dropbox",
+          email: claims.email || null,
+          emailVerified: claims.email_verified === true,
+        });
+        if (!anchor.ok)
+          return json({ error: "email_taken", existing_provider: anchor.existing_provider }, 409, origin);
         const session = await mintAgriSession(env, sub, {
           provider: "dropbox",
           email: claims.email || null,
@@ -563,6 +571,14 @@ export default {
         const expectedAud = env.GOOGLE_CLIENT_ID || body.client_id || null;
         const claims = await verifyOidcIdToken(body.id_token, OIDC_PROVIDERS.google, expectedAud);
         const sub = `google:${claims.sub}`;
+        const anchor = await resolveEmailAnchor(env, {
+          sub,
+          provider: "google",
+          email: claims.email || null,
+          emailVerified: claims.email_verified === true,
+        });
+        if (!anchor.ok)
+          return json({ error: "email_taken", existing_provider: anchor.existing_provider }, 409, origin);
         const session = await mintAgriSession(env, sub, {
           provider: "google",
           email: claims.email || null,
@@ -590,6 +606,16 @@ export default {
       try {
         const fb = await verifyFacebookAccessToken(body.access_token, env);
         const sub = `facebook:${fb.sub}`;
+        // Facebook never asserts email verification → emailVerified:false. It can't claim an
+        // anchor, but is still blocked if the email already belongs to a verified account.
+        const anchor = await resolveEmailAnchor(env, {
+          sub,
+          provider: "facebook",
+          email: fb.email || null,
+          emailVerified: false,
+        });
+        if (!anchor.ok)
+          return json({ error: "email_taken", existing_provider: anchor.existing_provider }, 409, origin);
         const session = await mintAgriSession(env, sub, {
           provider: "facebook",
           email: fb.email,
@@ -979,6 +1005,50 @@ async function verifyFacebookAccessToken(accessToken, env) {
     }
   } catch {}
   return { sub: String(data.user_id), email, name };
+}
+
+// ============= Email anchor: one verified email ↦ one account (block, don't merge) =============
+// At account creation we bind the (verified) email to the account's `sub`. Thereafter:
+//   • a DIFFERENT account presenting the same email is BLOCKED (no silent merge → no takeover);
+//   • the SAME account whose provider email later changes is FROZEN — we keep serving it
+//     (identity is the immutable `sub`), but never move the anchor. A future email-change
+//     feature re-verifies and re-points the index.
+// Only a VERIFIED email may CLAIM an anchor — this is what stops a provider with weak/absent
+// email verification (Facebook) from squatting someone else's address (account pre-hijacking).
+// KV (env.SHARE_KV): `email/<lowercased>` → {sub, provider, created_at};  `anchor/<sub>` → email.
+// Returns { ok:true } to proceed, or { ok:false, existing_provider } → caller responds 409.
+async function resolveEmailAnchor(env, { sub, provider, email, emailVerified }) {
+  if (!email || !env.SHARE_KV) return { ok: true }; // nothing to enforce
+  const norm = String(email).trim().toLowerCase();
+  if (!norm) return { ok: true };
+
+  // Already anchored? Then this is a returning account. If its provider email changed since,
+  // FREEZE: ignore the new address entirely (don't claim it, don't block on it).
+  const anchored = await env.SHARE_KV.get(`anchor/${sub}`).catch(() => null);
+  if (anchored) return { ok: true };
+
+  // No anchor yet (new sign-up, or a pre-existing account being indexed lazily).
+  let existing = null;
+  const raw = await env.SHARE_KV.get(`email/${norm}`).catch(() => null);
+  if (raw) {
+    try {
+      existing = JSON.parse(raw);
+    } catch {}
+  }
+  if (existing && existing.sub !== sub) {
+    return { ok: false, existing_provider: existing.provider || null }; // owned by another account
+  }
+  // Claim (or repair) the anchor — verified emails only. Facebook (emailVerified=false) reaches
+  // here, never claims, and so can still create a sub-only account when there's no collision.
+  if (emailVerified) {
+    if (!existing) {
+      await env.SHARE_KV
+        .put(`email/${norm}`, JSON.stringify({ sub, provider, created_at: Math.floor(Date.now() / 1000) }))
+        .catch(() => {});
+    }
+    await env.SHARE_KV.put(`anchor/${sub}`, norm).catch(() => {});
+  }
+  return { ok: true };
 }
 
 // ============= AgriVision session JWT (HS256) — mint + verify =============
