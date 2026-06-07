@@ -215,12 +215,19 @@ export function installParcels(app) {
       else {
         const cap = maxParcelsForCurrentPlan();
         if (app.selectedParcels.size >= cap) {
-          parcelInfoEl.innerHTML = `<dt>Limite atteinte</dt><dd class="small">Ton plan actuel autorise ${cap} parcelle${cap > 1 ? "s" : ""} max. <a href="#" id="upgrade-from-parcels" style="color:var(--accent)">Passer à un plan supérieur ↗</a></dd>`;
-          parcelInfoEl.style.display = "block";
-          document.getElementById("upgrade-from-parcels")?.addEventListener("click", (e) => {
-            e.preventDefault();
-            document.getElementById("app-menu-panel").style.display = "block";
-          });
+          // Over plan: reject the addition (nothing sticks on the map) and surface a loud,
+          // actionable toast with an upgrade path — see CLAUDE.md "Gating". The enforcement
+          // boundary just emits the event; toast.js renders it.
+          window.dispatchEvent(
+            new CustomEvent("agrivision:plan-blocked", {
+              detail: {
+                feature: "parcels",
+                current: app.selectedParcels.size,
+                cap,
+                message: `Limite atteinte : ${app.selectedParcels.size}/${cap} parcelle${cap > 1 ? "s" : ""}. Passe à un plan supérieur pour en sélectionner davantage.`,
+              },
+            })
+          );
           return;
         }
         const parcel = {

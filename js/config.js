@@ -5,7 +5,16 @@
 // WORKER_URL set → calls the Cloudflare Worker which holds the API key server-side. RECOMMENDED.
 // WORKER_URL empty → falls back to direct browser call using ANTHROPIC_API_KEY below.
 //   Only safe on localhost for testing — key is exposed in the bundle.
-export const WORKER_URL = "http://localhost:8787";
+//
+// Environment-aware: localhost dev hits the local `wrangler dev` Worker; everywhere else (the
+// deployed app over HTTPS) MUST hit the deployed Worker — an HTTPS page cannot call http://localhost
+// (mixed content → "Failed to fetch"). Set WORKER_URL_PROD to your deployed Worker URL, printed by
+// `cd worker && npx wrangler deploy` (e.g. https://agrivision-api.<your-subdomain>.workers.dev),
+// or a custom route/domain if you add one.
+const WORKER_URL_DEV = "http://localhost:8787";
+const WORKER_URL_PROD = "https://agrivision-api.benoit-ef0.workers.dev";
+const _isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/.test(location.hostname);
+export const WORKER_URL = _isLocalhost ? WORKER_URL_DEV : WORKER_URL_PROD;
 export const ANTHROPIC_API_KEY = ""; // only used when WORKER_URL is empty
 export const ANTHROPIC_MODEL = "claude-haiku-4-5";
 
@@ -57,7 +66,7 @@ export const GOOGLE_CLIENT_ID =
 // redirect URI on the client above. Used only when its origin matches the page's origin
 // (i.e. in production on solven.eu); on any other origin (localhost dev) the app falls back
 // to this page's own URL — so register BOTH this and your dev URL as redirect URIs.
-export const GOOGLE_REDIRECT_URI = "https://solven.eu/agrivision/";
+export const GOOGLE_REDIRECT_URI = "https://www.solven.eu/agrivision/";
 
 // Facebook: create an app at https://developers.facebook.com/apps (product: Facebook Login).
 //   - Add your origin under "Allowed Domains for the JavaScript SDK".

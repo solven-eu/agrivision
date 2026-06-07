@@ -46,14 +46,13 @@ FACEBOOK_APP_ID = "26899197766369996"   # must match FACEBOOK_APP_ID in js/confi
 # https://<your-worker>.workers.dev/api/billing/webhook with these events:
 # customer.subscription.created/updated/deleted, invoice.payment_failed).
 
-# KV namespace for "Share with AgriVision" + storage pointers + backup restore.
-# For local `wrangler dev` the id below is a placeholder (local mode simulates KV).
-# BEFORE DEPLOY: create a real namespace and replace the id:
-#   wrangler kv namespace create SHARE_KV   # prints the production id
-# (and ideally `wrangler kv namespace create SHARE_KV --preview` for `wrangler dev --remote`).
+# KV namespace for "Share with AgriVision" + storage pointers + backup restore + the
+# email-anchor account index. Production namespace created via `wrangler kv namespace create
+# SHARE_KV`. For `wrangler dev --remote`, also create a preview namespace and add its id as
+# `preview_id` below: `wrangler kv namespace create SHARE_KV --preview`.
 [[kv_namespaces]]
 binding = "SHARE_KV"
-id = "local_placeholder_replace_before_deploy"
+id = "077d043f23b44441adc8b7417f862e9e"
 
 # Rain alerts (Web Push). VAPID private key (P-256 scalar, base64url) — pairs with the public
 # key in js/config.js + worker.js VAPID_PUBLIC_KEY. Regenerate the pair to rotate.

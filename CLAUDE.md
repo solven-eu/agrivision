@@ -51,6 +51,14 @@ We accept some abuse as long as **token + photo + storage + KV-write quotas are 
 
 Do not reflexively add IP-based rate-limiting, captchas, or moderation-AI gates on the front of `/api/*` routes unless concrete abuse patterns show up in logs. Premature defenses cost UX (mobile users behind NAT get false-positive blocked) and engineering time. The quota architecture is the right ceiling for a PoC and reasonably for early prod.
 
+## Gating: make plan/login limits loud and actionable
+
+When a user can't use something because of their **plan** (cap/quota/tier) or because they're **not logged in**, that must be **loud and actionable** — never a silent no-op, never a note that's easy to miss (e.g. buried in a collapsed sidebar panel).
+
+Preferred pattern: let the action run to its natural **enforcement boundary** rather than pre-disabling/hiding the affordance — the user should be able to discover the feature exists and learn how to unlock it. The boundary is either a client-side check (e.g. the parcel cap) or, for server-enforced features, the **Worker returning a structured error** (same shape as the `409 {error, …}` used for `email_taken` / quotas). That boundary then dispatches `agrivision:plan-blocked` with `{ feature, current, cap, message, requiresLogin }`. A single central listener (`js/toast.js` → `installGateToasts`) renders a toast with a one-tap fix: **"Améliorer mon plan"** (→ `agrivision:open-plans`) or **"Se connecter"** (→ `agrivision:open-login`). Reuse `toast()` from `js/toast.js` for other transient feedback; pass an `id` to de-dupe repeated triggers.
+
+A blocked action must leave **no partial side effect**: e.g. a rejected parcel must not linger highlighted on the map, a blocked upload must not show a half-added thumbnail. Reject cleanly, then signal.
+
 ## Git: never mutate the repository state
 
 **The user owns all git history operations. No exceptions.**

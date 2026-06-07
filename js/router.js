@@ -13,11 +13,16 @@ import { bearingTo, cardinal } from "./util.js";
  *   - getParcelsLocked — accessor
  *   - placePhotoMarker, renderPhotos (fns)
  *   - toggleParcelAt (fn)
+ *   - closeParcelDetail (fn) — dismiss the open parcel detail sheet, if any
  *   - flashLockHint (fn) — visual feedback when click happens while locked
  *   - showZoomTooLowMessage (fn) — sidebar feedback when zoom is too low
  */
 export function installMapClickRouter(app) {
   app.map.on("click", async (e) => {
+    // Any click on the map dismisses an open parcel detail sheet. If the click lands on a
+    // parcel, toggleParcelAt below re-opens the relevant one; an empty-map click just closes it.
+    app.closeParcelDetail?.();
+
     // Photo placement (drop pin)
     const placingId = app.getPlacingPhotoId();
     if (placingId) {

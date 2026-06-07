@@ -835,6 +835,7 @@ document.getElementById("report-btn")?.addEventListener("click", openChatSection
 // ============ Share with AgriVision (opt-in KV mirror) ============
 import { createShare, tradeDropboxIdTokenForSession, maybeRefreshSession } from "./share.js";
 import { renderPlansCard, handleBillingReturn } from "./billing.js";
+import { installGateToasts } from "./toast.js";
 // Boot-time identity housekeeping:
 // 1. If an old id_token is present without a session, mint one (backfill for users
 //    who connected before /api/auth/dropbox/login existed).
@@ -867,6 +868,21 @@ window.addEventListener("agrivision:login", () => {
   share.fetchQuota();
 });
 window.addEventListener("agrivision:logout", () => share.render());
+
+// ============ Gating: turn plan/login limits into actionable toasts ============
+// Any feature blocked by plan/quota/login dispatches `agrivision:plan-blocked`; installGateToasts
+// renders the toast, whose action re-dispatches one of the two events handled here. See CLAUDE.md
+// "Gating: make plan/login limits loud and actionable".
+installGateToasts();
+window.addEventListener("agrivision:open-plans", () => {
+  if (!_appMenuPanel) return;
+  _appMenuPanel.style.display = "block";
+  share.render();
+  share.fetchQuota();
+  renderPlansCard("plans-panel", (window.__lastPlanTier ||= "free"));
+  document.getElementById("plans-panel")?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+});
+window.addEventListener("agrivision:open-login", () => showTutorial({ startAtLogin: true }));
 
 // ============ Satellite imagery (Sentinel-2 via Worker → CDSE) ============
 import { createSatellite } from "./satellite.js";
@@ -1105,6 +1121,7 @@ installMapClickRouter({
   placePhotoMarker,
   renderPhotos,
   toggleParcelAt,
+  closeParcelDetail: parcels.closeParcelDetail,
   flashLockHint: parcels.flashLockHint,
   showZoomTooLowMessage: parcels.showZoomTooLowMessage,
 });

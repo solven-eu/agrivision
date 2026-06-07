@@ -222,26 +222,31 @@ export function createAuth() {
     await completeGoogleLogin(idToken, sessionStorage.getItem("g_nonce"));
   }
 
-  async function loginWithFacebook() {
+  // The FB SDK rejects an async function as the callback ("Expression is of type asyncfunction,
+  // not function"), so the callback must be plain — it kicks off the async token trade without
+  // awaiting.
+  function runFacebookLogin(FB) {
+    FB.login(
+      (response) => {
+        const token = response?.authResponse?.accessToken;
+        if (!token) return; // user cancelled or not authorized
+        tradeFacebookTokenForSession(token)
+          .then(render)
+          .catch((e) => console.warn("facebook session trade failed:", e.message));
+      },
+      { scope: "public_profile,email" }
+    );
+  }
+
+  function loginWithFacebook() {
     if (!FACEBOOK_APP_ID) return;
-    try {
-      const FB = await loadFacebookSdk(FACEBOOK_APP_ID);
-      // The FB SDK rejects an async function as the callback ("Expression is of type
-      // asyncfunction, not function"), so the callback must be plain — it kicks off the async
-      // token trade without awaiting.
-      FB.login(
-        (response) => {
-          const token = response?.authResponse?.accessToken;
-          if (!token) return; // user cancelled or not authorized
-          tradeFacebookTokenForSession(token)
-            .then(render)
-            .catch((e) => console.warn("facebook session trade failed:", e.message));
-        },
-        { scope: "public_profile,email" }
-      );
-    } catch (e) {
-      console.warn("facebook login error:", e.message);
-    }
+    // Call FB.login SYNCHRONOUSLY when the SDK is already loaded (preloaded at init below) so the
+    // popup stays tied to the user's click gesture and isn't blocked. Only fall back to the async
+    // load — which can trip popup blockers on the very first click — if it isn't ready yet.
+    if (window.FB) return runFacebookLogin(window.FB);
+    loadFacebookSdk(FACEBOOK_APP_ID)
+      .then(runFacebookLogin)
+      .catch((e) => console.warn("facebook login error:", e.message));
   }
 
   // Dropbox doubles as identity + storage. The OAuth flow lives in persistence.js; we ask
@@ -387,6 +392,11 @@ export function createAuth() {
 
   // If we landed here from a popup-blocked full-page Google redirect, finish the login.
   handleGoogleRedirectReturn();
+
+  // Preload the Facebook SDK in the background so the first click on "Continuer avec Facebook"
+  // can call FB.login synchronously (see loginWithFacebook) instead of awaiting the script — an
+  // await between the click and FB.login is what gets the popup blocked.
+  if (FACEBOOK_APP_ID) loadFacebookSdk(FACEBOOK_APP_ID).catch(() => {});
 
   return { render, signOut, isLoggedIn: () => !!currentSession() };
 }
