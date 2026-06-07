@@ -38,7 +38,7 @@ export const DROPBOX_APP_KEY = "rimf9kjv2vhki4j";
 // origin (production); on any other origin (localhost/file://) the app falls back to the manual
 // code-paste flow. Register both this and any dev URL you use.
 //   Console: https://www.dropbox.com/developers/apps/info/rimf9kjv2vhki4j → OAuth 2 → Redirect URIs
-export const DROPBOX_REDIRECT_URI = "https://www.solven.eu/agrivision/";
+export const DROPBOX_REDIRECT_URI = "https://www.solven.eu/agrivision/oauth-callback.html";
 
 // === Social identity providers (login only — no storage) ===
 // These authenticate the user to the AgriVision backend (quota, billing, sharing).
@@ -66,7 +66,9 @@ export const GOOGLE_CLIENT_ID =
 // redirect URI on the client above. Used only when its origin matches the page's origin
 // (i.e. in production on solven.eu); on any other origin (localhost dev) the app falls back
 // to this page's own URL — so register BOTH this and your dev URL as redirect URIs.
-export const GOOGLE_REDIRECT_URI = "https://www.solven.eu/agrivision/";
+// Points at the lightweight oauth-callback.html (not the full app) so the OAuth popup doesn't
+// boot the map/tiles just to read the token. Register THIS exact URL as an Authorized redirect URI.
+export const GOOGLE_REDIRECT_URI = "https://www.solven.eu/agrivision/oauth-callback.html";
 
 // Facebook: create an app at https://developers.facebook.com/apps (product: Facebook Login).
 //   - Add your origin under "Allowed Domains for the JavaScript SDK".

@@ -24,6 +24,12 @@ function dropboxRedirectUri() {
       if (new URL(DROPBOX_REDIRECT_URI).origin === location.origin) return DROPBOX_REDIRECT_URI;
     } catch {}
   }
+  // Other http(s) origins (e.g. localhost dev): the callback page sits next to index.html.
+  // Requires that exact URL to be registered in the Dropbox app console. file:// can't be a
+  // Dropbox redirect, so it keeps the manual code-paste fallback (return null).
+  if (location.protocol === "http:" || location.protocol === "https:") {
+    return location.origin + location.pathname.replace(/[^/]*$/, "") + "oauth-callback.html";
+  }
   return null;
 }
 

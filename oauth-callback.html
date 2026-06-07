@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>AgriVision — connexion…</title>
+    <style>
+      body {
+        font: 14px/1.5 system-ui, -apple-system, sans-serif;
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 24px;
+        background: #0f1419;
+        color: #e6edf3;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="msg">Connexion en cours…</div>
+    <!--
+      Minimal OAuth popup landing page. Providers redirect the POPUP here (not the full app) so we
+      don't boot Leaflet/tiles just to read a token. We hand the result to the opener via
+      postMessage and close. If there's no opener (popup was blocked → full-page redirect), we
+      forward to index.html so the app's handle*RedirectReturn() finishes the exchange.
+      Google returns #id_token (fragment); Dropbox returns ?code (query).
+    -->
+    <script>
+      (function () {
+        function parse(s) {
+          return new URLSearchParams(s.replace(/^[#?]/, ""));
+        }
+        var hash = parse(location.hash);
+        var query = parse(location.search);
+        var msg = null;
+        if (hash.has("id_token") || hash.has("error")) {
+          msg = {
+            type: "agri:google-auth",
+            id_token: hash.get("id_token"),
+            state: hash.get("state"),
+            error: hash.get("error"),
+          };
+        } else if (query.has("code") || query.has("error")) {
+          msg = {
+            type: "agri:dropbox-auth",
+            code: query.get("code"),
+            state: query.get("state"),
+            error: query.get("error"),
+          };
+        }
+        var el = document.getElementById("msg");
+        if (!msg) {
+          el.textContent = "Aucune information d'authentification dans l'URL.";
+          return;
+        }
+        if (window.opener && window.opener !== window) {
+          try {
+            window.opener.postMessage(msg, location.origin);
+          } catch (e) {}
+          el.textContent = "Authentification terminée. Vous pouvez fermer cette fenêtre.";
+          setTimeout(function () {
+            try {
+              window.close();
+            } catch (e) {}
+          }, 50);
+        } else {
+          // Popup was blocked → full-page redirect landed here. Forward to the app, preserving the
+          // OAuth params, so the app completes the exchange (verifier/state live in its sessionStorage).
+          el.textContent = "Redirection…";
+          location.replace("./index.html" + location.search + location.hash);
+        }
+      })();
+    </script>
+  </body>
+</html>

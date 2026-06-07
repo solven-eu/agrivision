@@ -5,7 +5,7 @@
 // A new SW waits (no auto-skipWaiting) until the page asks it to activate via SKIP_WAITING,
 // so the user gets an "update ready" prompt instead of a surprise mid-session swap.
 // Bump CACHE_VERSION only for a hard purge (e.g. a breaking cache-shape change).
-const CACHE_VERSION = "agriv-v6";
+const CACHE_VERSION = "agriv-v7";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -88,13 +88,18 @@ self.addEventListener("fetch", (event) => {
   if (!sameOrigin && !isStaticLib) return;
 
   // 1) Navigations (the HTML document) → network-first: a fresh deploy is picked up while
-  //    online; if offline, fall back to the precached shell so the app still boots.
+  //    online; if offline, fall back to the precached shell so the app still boots. Only the
+  //    app shell is cached under ./index.html — auxiliary pages (e.g. oauth-callback.html) must
+  //    NOT overwrite it, so we skip caching non-shell navigations.
   if (req.mode === "navigate") {
+    const isAppShell = url.pathname.endsWith("/") || url.pathname.endsWith("/index.html");
     event.respondWith(
       fetch(req)
         .then((res) => {
-          const clone = res.clone();
-          caches.open(CACHE_VERSION).then((c) => c.put("./index.html", clone));
+          if (isAppShell) {
+            const clone = res.clone();
+            caches.open(CACHE_VERSION).then((c) => c.put("./index.html", clone));
+          }
           return res;
         })
         .catch(() =>

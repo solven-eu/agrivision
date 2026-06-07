@@ -68,7 +68,8 @@ function googleRedirectUri() {
       if (new URL(GOOGLE_REDIRECT_URI).origin === location.origin) return GOOGLE_REDIRECT_URI;
     } catch {}
   }
-  return location.origin + location.pathname;
+  // Dev fallback: the callback page sits next to index.html in the current directory.
+  return location.origin + location.pathname.replace(/[^/]*$/, "") + "oauth-callback.html";
 }
 
 function randomToken() {

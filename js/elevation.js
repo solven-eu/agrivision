@@ -3,8 +3,9 @@
 // métro + 5-25 m for DOM including Réunion). Returns elevation in meters.
 //
 //   GET https://data.geopf.fr/altimetrie/1.0/calcul/alti/rest/elevation.json
-//       ?lon=55.498&lat=-21.125&zonly=true
+//       ?lon=55.498&lat=-21.125&zonly=true&resource=ign_rge_alti_wld
 //   → { "elevations": [121.4] }
+//   NOTE: the `resource` param is mandatory — omitting it makes the gateway return 405.
 //
 // Cached in localStorage per ~10m coordinate bucket. Altitude doesn't change, so the
 // cache TTL is essentially "forever" (we set 90 days as a sanity reset).
@@ -24,7 +25,9 @@ export async function fetchAltitude(lat, lon) {
     if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.altitude;
   } catch {}
   try {
-    const url = `https://data.geopf.fr/altimetrie/1.0/calcul/alti/rest/elevation.json?lon=${lon}&lat=${lat}&zonly=true`;
+    // `resource` is now REQUIRED by the IGN gateway — without it the Kong proxy returns 405.
+    // ign_rge_alti_wld = RGE ALTI worldwide (covers FR métropole + DOM, incl. La Réunion).
+    const url = `https://data.geopf.fr/altimetrie/1.0/calcul/alti/rest/elevation.json?lon=${lon}&lat=${lat}&zonly=true&resource=ign_rge_alti_wld`;
     const r = await fetch(url);
     if (!r.ok) {
       console.warn(`[elevation] ${url} → HTTP ${r.status}`);
