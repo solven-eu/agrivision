@@ -139,6 +139,29 @@ export async function compressImage(
   };
 }
 
+// Re-encode an existing image (a data: URL already in memory) at a smaller dimension and lower
+// JPEG quality. Unlike compressImage (which takes a File on upload), this re-compresses a photo
+// we already hold — used by the "reduce photo quality" action to reclaim localStorage space
+// without the original file. Returns the same shape fields the photo object uses.
+export async function shrinkDataUrl(dataUrl, { maxDim = 1280, quality = 0.6 } = {}) {
+  const img = await new Promise((res, rej) => {
+    const im = new Image();
+    im.onload = () => res(im);
+    im.onerror = rej;
+    im.src = dataUrl;
+  });
+  const maxSide = Math.max(img.width, img.height) || 1;
+  const scale = Math.min(1, maxDim / maxSide);
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+  const out = canvas.toDataURL("image/jpeg", quality);
+  return { dataUrl: out, b64: out.split(",")[1], mime: "image/jpeg", width: w, height: h };
+}
+
 // ---------- JSON resilience ----------
 
 // Parse Claude's response defensively. Handles markdown fences, trailing commas,

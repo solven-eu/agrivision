@@ -8,6 +8,7 @@
 
 import { WORKER_URL } from "./config.js";
 import { workerAuthHeader } from "./share.js";
+import { safeSetItem } from "./storage-health.js";
 
 const CACHE_PREFIX = "wx:";
 const CACHE_TTL_MS = 2 * 3600 * 1000; // forecast refresh ~2h
@@ -31,7 +32,7 @@ async function fetchWeather(lat, lon) {
   if (!r.ok) return null;
   const data = await r.json();
   try {
-    localStorage.setItem(key, JSON.stringify({ fetchedAt: Date.now(), data }));
+    safeSetItem(key, JSON.stringify({ fetchedAt: Date.now(), data }));
   } catch {}
   return data;
 }

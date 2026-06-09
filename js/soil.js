@@ -12,6 +12,7 @@
 //   (RMQS for métropole — see ROADMAP).
 
 import { WORKER_URL } from "./config.js";
+import { safeSetItem } from "./storage-health.js";
 
 const CACHE_PREFIX = "soil:";
 const CACHE_TTL_MS = 30 * 24 * 3600 * 1000; // 30 days — soil data is essentially static
@@ -45,7 +46,7 @@ export async function fetchSoilAt(lat, lon, n = 5) {
       console.warn("[soil] missing summary in response:", j);
       return { error: "no summary in response" };
     }
-    localStorage.setItem(k, JSON.stringify({ fetchedAt: Date.now(), data: j }));
+    safeSetItem(k, JSON.stringify({ fetchedAt: Date.now(), data: j }));
     return j;
   } catch (e) {
     console.warn("[soil] fetch error:", e.message);

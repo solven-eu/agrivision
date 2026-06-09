@@ -11,6 +11,7 @@
 
 import { WORKER_URL } from "./config.js";
 import { workerAuthHeader } from "./share.js";
+import { safeSetItem } from "./storage-health.js";
 
 // Bounding box [west, south, east, north] from the selected parcels' GeoJSON geometries.
 function bboxFromParcels(selectedParcels) {
@@ -220,11 +221,7 @@ export function createSatellite(app) {
     const l = j.latest;
     if (!l) return null;
     const data = { mean: l.mean, min: l.min, max: l.max, date: (l.to || "").slice(0, 10), label: ndviLabel(l.mean), series: j.series };
-    if (key) {
-      try {
-        localStorage.setItem(key, JSON.stringify({ fetchedAt: Date.now(), data }));
-      } catch {}
-    }
+    if (key) safeSetItem(key, JSON.stringify({ fetchedAt: Date.now(), data }));
     return data;
   }
 

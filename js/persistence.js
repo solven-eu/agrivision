@@ -13,6 +13,7 @@ import {
 } from "./share.js";
 import { ensureSoilForSelected } from "./soil.js";
 import { ensureAltitudeForSelected } from "./elevation.js";
+import { safeSetItem } from "./storage-health.js";
 
 // Dropbox OAuth round-trip back to our app. Use the configured redirect only when its origin
 // matches the page (production); otherwise return null so the caller uses the manual code-paste
@@ -83,7 +84,18 @@ export function createDbx(app) {
     session: "agri_culture_id",
     crop: "agri_culture_crop",
     uploaded: "agri_uploaded_photos", // photoId → true (per culture)
+    // Local working-session mirror, split in two so the small part can be rewritten cheaply on
+    // every change while the large photo bytes are rewritten only when they actually change:
+    //   localSession: { manifest, cropCode, sessionId }   — parcels + photo METADATA + analysis…
+    //   localPhotos:  [{ id, mime, b64 }]                 — inline photo bytes (the bulk)
+    // Together they let the whole session survive a reload WITHOUT Dropbox, and seed the upload
+    // when the user connects Dropbox later. See saveLocalManifest / restoreFromLocal.
+    localSession: "agri_local_session",
+    localPhotos: "agri_local_photos",
   };
+  // Signature of the photo bytes last written to LS.localPhotos — lets saveLocalManifest skip
+  // re-serializing megabytes of base64 when only the manifest (parcels/analysis/chat) changed.
+  let lastLocalPhotosSig = null;
   const state = {
     enabled: !!DROPBOX_APP_KEY,
     token: localStorage.getItem(LS.token) || null,
@@ -160,6 +172,10 @@ export function createDbx(app) {
     localStorage.removeItem(LS.session);
     localStorage.removeItem(LS.crop);
     localStorage.removeItem(LS.uploaded);
+    // Don't let a new culture resurrect the old local mirror.
+    localStorage.removeItem(LS.localSession);
+    localStorage.removeItem(LS.localPhotos);
+    lastLocalPhotosSig = null;
   }
   function persistUploaded() {
     localStorage.setItem(LS.uploaded, JSON.stringify(state.uploaded));
@@ -423,36 +439,10 @@ export function createDbx(app) {
     return out;
   }
 
-  async function saveNow() {
-    if (!state.enabled || !state.token) return;
-    if (state.suspendSave) return; // load in progress — don't save half-rehydrated state
-    setSaveStatus("saving");
-    ensureSession();
-    const base = basePath();
-
-    // Upload any new app.photos.
-    for (const p of app.photos) {
-      if (state.uploaded[p.id]) continue;
-      const ext = (p.mime || "image/jpeg").split("/")[1] || "jpg";
-      try {
-        await uploadFile(`${base}/photos/${p.id}.${ext}`, bytesFromB64(p.b64));
-        state.uploaded[p.id] = { name: p.name, mime: p.mime };
-        persistUploaded();
-      } catch (e) {
-        setSaveStatus("error");
-        renderPanel(`Erreur photo : ${e.message}`);
-        return;
-      }
-    }
-    // Drop entries for app.photos no longer present.
-    const currentIds = new Set(app.photos.map((p) => p.id));
-    for (const id of Object.keys(state.uploaded)) {
-      if (!currentIds.has(id)) delete state.uploaded[id];
-    }
-    persistUploaded();
-
-    // Build manifest (no base64 — photo bytes already uploaded).
-    const manifest = {
+  // Build the session manifest (photo bytes referenced by file, not inlined). Shared by the
+  // Dropbox save (saveNow) and the local mirror (saveLocalManifest).
+  function buildManifest() {
+    return {
       schema: 2,
       culture_id: state.sessionId,
       crop_code: state.cropCode,
@@ -490,6 +480,127 @@ export function createDbx(app) {
       conversation_dialect: app.getConversationDialect?.() || null,
       user_profile: state.lastUserProfile || null,
     };
+  }
+
+  // ===== Local working-session mirror (localStorage) =====
+  // Persist the FULL session — manifest + inline photo bytes (base64) — to localStorage, so it
+  // survives a reload with no Dropbox at all. Photos are inlined (unlike the Dropbox manifest,
+  // where bytes live in separate files), which is what makes a reload self-sufficient. When the
+  // store can't hold the photos, safeSetItem returns false and raises the storage-full warning;
+  // we then fall back to caching the manifest WITHOUT photos so at least parcels/analysis survive.
+  function saveLocalManifest() {
+    // Nothing meaningful to cache → drop any stale mirror so a reload starts clean.
+    if (app.selectedParcels.size === 0 && app.photos.length === 0 && !state.lastAnalysis) {
+      localStorage.removeItem(LS.localSession);
+      localStorage.removeItem(LS.localPhotos);
+      lastLocalPhotosSig = null;
+      console.log("[local] saveLocalManifest: nothing to cache → cleared mirror");
+      return;
+    }
+    ensureSession(); // make sure we have a sessionId/cropCode to restore under
+    // Small part — manifest (parcels + photo metadata + analysis + chat). Cheap to rewrite often.
+    const manifest = buildManifest();
+    const okManifest = safeSetItem(
+      LS.localSession,
+      JSON.stringify({ manifest, cropCode: state.cropCode, sessionId: state.sessionId })
+    );
+    // Large part — inline photo bytes. Only rewrite when the photo set/bytes changed (a parcel
+    // click or chat turn shouldn't re-serialize megabytes of base64).
+    const sig = app.photos.map((p) => `${p.id}:${p.b64 ? p.b64.length : 0}`).join(",");
+    if (sig === lastLocalPhotosSig) {
+      console.log(
+        `[local] saved manifest ✓ (${manifest.parcels.length} parc, ${manifest.photos.length} ph) — photo bytes unchanged, skipped`
+      );
+      return;
+    }
+    const photos = app.photos.filter((p) => p.b64).map((p) => ({ id: p.id, mime: p.mime, b64: p.b64 }));
+    // Guard: if photos exist but none have bytes yet (e.g. mid-restore, still loading), don't
+    // overwrite the cache with an empty list — that would lose the very photos we're restoring.
+    if (app.photos.length > 0 && photos.length === 0) {
+      console.log("[local] photos still loading (no bytes yet) — deferring photo write");
+      return;
+    }
+    const okPhotos = safeSetItem(LS.localPhotos, JSON.stringify(photos));
+    if (okPhotos) {
+      lastLocalPhotosSig = sig;
+      console.log(
+        `[local] saved ✓ manifest(${manifest.parcels.length} parc) + ${photos.length} photo bytes [manifestOk=${okManifest}]`
+      );
+    } else {
+      // Photos didn't fit. Drop the photo cache so the manifest (parcels/analysis) still survives;
+      // the storage-full toast already fired (via safeSetItem) prompting compression / Dropbox.
+      localStorage.removeItem(LS.localPhotos);
+      lastLocalPhotosSig = "";
+      console.warn("[local] photos did NOT fit localStorage — kept manifest only (compress/connect Dropbox)");
+    }
+  }
+
+  function loadLocalManifest() {
+    try {
+      const s = JSON.parse(localStorage.getItem(LS.localSession) || "null");
+      if (!s?.manifest) return null;
+      const photos = JSON.parse(localStorage.getItem(LS.localPhotos) || "[]");
+      return { ...s, photos: Array.isArray(photos) ? photos : [] };
+    } catch {
+      return null;
+    }
+  }
+
+  // Restore the full session from the localStorage mirror. Mirrors restoreFromAgriVision but reads
+  // photo bytes inline from the cache. Returns true if a cached session was applied.
+  async function restoreFromLocal() {
+    const data = loadLocalManifest();
+    if (!data?.manifest) {
+      console.log("[local] restoreFromLocal: no cached session found");
+      return false;
+    }
+    console.log(
+      `[local] restoreFromLocal: found session ${data.sessionId} — ${data.manifest.parcels?.length || 0} parc, ${data.photos?.length || 0} photo bytes`
+    );
+    const byId = new Map((data.photos || []).map((p) => [p.id, p]));
+    const getPhotoData = async (photo) => {
+      const p = byId.get(photo.id);
+      if (!p) throw new Error("photo absente du cache local");
+      return { b64: p.b64, dataUrl: `data:${p.mime || "image/jpeg"};base64,${p.b64}` };
+    };
+    await loadSession(data.cropCode || data.manifest.crop_code || "UNK", data.sessionId || data.manifest.culture_id, {
+      manifest: data.manifest,
+      getPhotoData,
+      local: true, // these photos are NOT in Dropbox — don't mark them uploaded
+    });
+    return true;
+  }
+
+  async function saveNow() {
+    if (!state.enabled || !state.token) return;
+    if (state.suspendSave) return; // load in progress — don't save half-rehydrated state
+    setSaveStatus("saving");
+    ensureSession();
+    const base = basePath();
+
+    // Upload any new app.photos.
+    for (const p of app.photos) {
+      if (state.uploaded[p.id]) continue;
+      const ext = (p.mime || "image/jpeg").split("/")[1] || "jpg";
+      try {
+        await uploadFile(`${base}/photos/${p.id}.${ext}`, bytesFromB64(p.b64));
+        state.uploaded[p.id] = { name: p.name, mime: p.mime };
+        persistUploaded();
+      } catch (e) {
+        setSaveStatus("error");
+        renderPanel(`Erreur photo : ${e.message}`);
+        return;
+      }
+    }
+    // Drop entries for app.photos no longer present.
+    const currentIds = new Set(app.photos.map((p) => p.id));
+    for (const id of Object.keys(state.uploaded)) {
+      if (!currentIds.has(id)) delete state.uploaded[id];
+    }
+    persistUploaded();
+
+    // Build manifest (no base64 — photo bytes already uploaded).
+    const manifest = buildManifest();
     try {
       await uploadFile(`${base}/culture.json`, new TextEncoder().encode(JSON.stringify(manifest, null, 2)));
       setSaveStatus("saved");
@@ -507,15 +618,39 @@ export function createDbx(app) {
   }
 
   function schedule() {
-    if (!state.enabled || !state.token || state.suspendSave) return;
-    if (state.saveStatus !== "saving" && state.saveStatus !== "loading") setSaveStatus("dirty");
+    // Save while loading would persist half-rehydrated state; and a fully empty session has
+    // nothing to mirror. Note: NO token check here — the local mirror must run even without
+    // Dropbox (that's what makes a no-login session survive a reload).
+    if (!state.enabled || state.suspendSave) {
+      console.log("[save] schedule() ignored (suspended/disabled):", { suspended: state.suspendSave });
+      return;
+    }
+    // The save badge tracks the DROPBOX sync; without a token there's no remote save to flag as
+    // pending, so don't strand the badge on "dirty" (the local mirror writes silently).
+    if (state.token && state.saveStatus !== "saving" && state.saveStatus !== "loading")
+      setSaveStatus("dirty");
+    const reset = saveTimer != null;
     clearTimeout(saveTimer);
+    console.log(`[save] debounce ${reset ? "RESET" : "armed"} (1.5s) → save will fire if idle`);
     saveTimer = setTimeout(() => {
-      saveInFlight = saveNow()
-        .catch((e) => console.error(e))
-        .finally(() => {
-          saveInFlight = null;
-        });
+      saveTimer = null;
+      console.log("[save] debounce ELAPSED → saving now");
+      // 1) Always mirror the full session (incl. photo bytes) to localStorage.
+      try {
+        saveLocalManifest();
+      } catch (e) {
+        console.warn("[local] save failed:", e?.message);
+      }
+      // 2) Push to Dropbox too, when connected.
+      if (state.token) {
+        console.log("[dropbox] saveNow() start (async upload)…");
+        saveInFlight = saveNow()
+          .then(() => console.log("[dropbox] saveNow() done ✓"))
+          .catch((e) => console.error("[dropbox] saveNow() failed:", e))
+          .finally(() => {
+            saveInFlight = null;
+          });
+      }
     }, 1500);
   }
 
@@ -608,6 +743,9 @@ export function createDbx(app) {
   // AgriVision-backup restore feed an already-loaded manifest and inline photo bytes — so
   // the same rehydration runs whether the data comes from the user's cloud or our mirror.
   async function loadSession(cropCode, sid, opts = {}) {
+    console.log(
+      `[restore] loadSession start: ${cropCode}/${sid} (source=${opts.local ? "local" : opts.manifest ? "inline" : "dropbox"}) — suspendSave ON`
+    );
     state.suspendSave = true;
     setSaveStatus("loading");
     showLoading(opts.manifest ? "Restauration…" : `Chargement du manifeste…`, 0);
@@ -733,7 +871,9 @@ export function createDbx(app) {
             photo.b64 = data.b64;
             photo.dataUrl = data.dataUrl;
             photo.loading = false;
-            state.uploaded[photo.id] = { name: photo.name, mime: photo.mime };
+            // Local restore: these bytes came from localStorage, NOT Dropbox — leave them
+            // un-"uploaded" so that connecting Dropbox later actually pushes them up.
+            if (!opts.local) state.uploaded[photo.id] = { name: photo.name, mime: photo.mime };
             if (photo.lat != null) app.placePhotoMarker(photo);
           } catch (e) {
             console.warn("photo reload failed", photo._file, e);
@@ -805,11 +945,15 @@ export function createDbx(app) {
       setSaveStatus("error");
       throw e;
     } finally {
+      console.log(
+        `[restore] loadSession done: ${app.selectedParcels.size} parc, ${app.photos.length} ph in memory — suspendSave releases in 3s`
+      );
       // Keep suspendSave true long enough for the MutationObservers triggered by
       // app.renderPhotos / app.renderParcelInfoPanel to fire and be debounced. Otherwise
       // load → render → observer → schedule() → spurious save of unchanged data.
       setTimeout(() => {
         state.suspendSave = false;
+        console.log("[restore] suspendSave released — saves re-enabled");
       }, 3000);
       hideLoading();
     }
@@ -859,12 +1003,25 @@ export function createDbx(app) {
       return;
     }
     if (!state.token) {
-      state.suspendSave = false;
+      // No Dropbox — restore the full session from the local mirror so a no-login session
+      // survives reloads. loadSession (inside restoreFromLocal) sets the view, basemap and the
+      // suspendSave timer itself; we only handle the "nothing cached" path.
+      let restored = false;
+      try {
+        restored = await restoreFromLocal();
+      } catch (e) {
+        console.warn("[local] restore failed:", e?.message);
+      }
       app.setPendingDbxLoad(false);
-      window.__initBasemap?.();
-      window.__setLoadingMsg?.("Configurez un crop");
-      setTimeout(() => window.__hideLoading?.(), 1200);
-      renderPanel("Non connecté — connectez Dropbox pour sauvegarder.");
+      if (restored) {
+        window.__hideLoading?.();
+      } else {
+        state.suspendSave = false;
+        window.__initBasemap?.();
+        window.__setLoadingMsg?.("Configurez un crop");
+        setTimeout(() => window.__hideLoading?.(), 1200);
+        renderPanel("Non connecté — session conservée en local ; connectez Dropbox pour la sauvegarder.");
+      }
       setTimeout(app.refreshChips, 300); // fallback chip refresh for the default view
       return;
     }
@@ -882,12 +1039,24 @@ export function createDbx(app) {
         const latest = list[0];
         await loadSession(latest.crop, latest.id);
       } else {
-        hideLoading();
-        state.suspendSave = false;
-        window.__setLoadingMsg?.("Configurez un crop");
-        setTimeout(() => window.__hideLoading?.(), 1200);
-        renderPanel("Aucun crop sauvegardé — créez-en un.");
-        setTimeout(app.refreshChips, 300);
+        // Dropbox is empty — fall back to the local mirror (may hold work made before connecting).
+        // Once restored, nudge a save after the suspend window so it propagates up to Dropbox.
+        let restored = false;
+        try {
+          restored = await restoreFromLocal();
+        } catch (e) {
+          console.warn("[local] restore failed:", e?.message);
+        }
+        if (restored) {
+          setTimeout(() => schedule(), 3500); // suspendSave clears at ~3s; then push to Dropbox
+        } else {
+          hideLoading();
+          state.suspendSave = false;
+          window.__setLoadingMsg?.("Configurez un crop");
+          setTimeout(() => window.__hideLoading?.(), 1200);
+          renderPanel("Aucun crop sauvegardé — créez-en un.");
+          setTimeout(app.refreshChips, 300);
+        }
       }
     } catch (e) {
       console.warn("[dbx] auto-reload failed:", e);
@@ -899,12 +1068,35 @@ export function createDbx(app) {
       // Always release the gate so subsequent user actions (move/click) behave normally.
       app.setPendingDbxLoad(false);
       window.__initBasemap?.();
+      // Ensure the RPG parcel layer is on the map. Its initial render is deferred at boot when a
+      // Dropbox reload is pending (see chips.js), so the restored-view path (loadSession → return)
+      // must add it here — otherwise the map shows no agricultural parcels after a logged-in
+      // reload. refreshChips is idempotent (adds the layer only if absent).
+      setTimeout(app.refreshChips, 300);
     }
   }
   // Fire after the rest of the script has set up event listeners + the app.map is ready.
   // Using window.load ensures all init code has run; setTimeout fires if load already happened.
   if (document.readyState === "complete") setTimeout(autoReloadLatest, 200);
   else window.addEventListener("load", () => setTimeout(autoReloadLatest, 200));
+
+  // Flush the local mirror SYNCHRONOUSLY when the page is hidden/closed/reloaded. The debounced
+  // save can be reset repeatedly by the soil/altitude re-renders that fire after a parcel is
+  // selected, so a quick reload could otherwise lose the just-made change. localStorage writes are
+  // synchronous, so this is a reliable last-chance save. pagehide is more reliable than
+  // beforeunload (esp. on mobile / bfcache).
+  window.addEventListener("pagehide", () => {
+    if (state.suspendSave) {
+      console.log("[dbx] pagehide: save suspended (load in progress) — skipping flush");
+      return;
+    }
+    try {
+      console.log("[dbx] pagehide → flushing local mirror");
+      saveLocalManifest();
+    } catch (e) {
+      console.warn("[dbx] pagehide flush failed:", e?.message);
+    }
+  });
 
   function setAnalysis(payload) {
     // Accept either flat metrics or { analysis, app.conversation, user_profile } envelope.

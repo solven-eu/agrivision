@@ -5,6 +5,7 @@
 // stations: [{ id, name }]}]}] }.
 
 import { WORKER_URL } from "./config.js";
+import { safeSetItem } from "./storage-health.js";
 
 const LS_KEY = "vigicrues_stations_v1";
 const LS_TTL_MS = 24 * 3600 * 1000;
@@ -52,7 +53,7 @@ export async function fetchCatalog() {
     if (!r.ok) return [];
     const j = await r.json();
     const regions = j.regions || [];
-    localStorage.setItem(LS_KEY, JSON.stringify({ fetchedAt: Date.now(), regions }));
+    safeSetItem(LS_KEY, JSON.stringify({ fetchedAt: Date.now(), regions }));
     return regions;
   } catch {
     return [];

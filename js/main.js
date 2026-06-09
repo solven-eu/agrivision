@@ -35,6 +35,7 @@ import {
   pointInPolygon,
   pointInGeom,
   compressImage,
+  shrinkDataUrl,
   robustParseJson,
   autoCloseJson,
 } from "./util.js";
@@ -195,7 +196,7 @@ installGeocoding({
   getPendingDbxLoad: () => pendingDbxLoad,
 });
 
-// Chip filter + RPG/cadastre WMS layers — extracted to js/chips.js
+// RPG/cadastre WMS layers + layer control — extracted to js/chips.js
 import { installChips } from "./chips.js";
 const { refreshChips, refreshRpgLayer } = installChips({
   map,
@@ -334,6 +335,51 @@ photoCamEl?.addEventListener("change", async () => {
 document.getElementById("photo-camera")?.addEventListener("click", () => photoCamEl?.click());
 // File picker fallback.
 document.getElementById("photo-file")?.addEventListener("click", () => photoEl.click());
+
+// Re-compress every in-memory photo at a lower dimension/quality to reclaim localStorage space
+// (the local session mirror inlines photo bytes — see persistence.js). Re-renders + triggers a
+// save afterwards. Triggered by the photos-section button and the `agrivision:compress-photos`
+// event (e.g. from the storage-full toast).
+async function compressAllPhotos() {
+  if (!photos.length) {
+    toast("Aucune photo à compresser.");
+    return;
+  }
+  const bytes = (p) => (p.b64 ? p.b64.length : 0);
+  const before = photos.reduce((s, p) => s + bytes(p), 0);
+  let changed = 0;
+  for (const p of photos) {
+    const src = p.dataUrl || (p.b64 ? `data:${p.mime || "image/jpeg"};base64,${p.b64}` : null);
+    if (!src) continue;
+    try {
+      const r = await shrinkDataUrl(src, { maxDim: 1280, quality: 0.6 });
+      // Only adopt the result if it actually got smaller (already-tiny photos stay as-is).
+      if (r.b64.length < bytes(p)) {
+        p.dataUrl = r.dataUrl;
+        p.b64 = r.b64;
+        p.mime = r.mime;
+        p.width = r.width;
+        p.height = r.height;
+        p.recompressed = true;
+        changed++;
+      }
+    } catch (e) {
+      console.warn("[compress] photo failed:", e?.message);
+    }
+  }
+  renderPhotos();
+  onInputsChanged(); // re-save (local mirror + Dropbox) with the smaller bytes
+  const after = photos.reduce((s, p) => s + bytes(p), 0);
+  const savedMb = Math.max(0, (before - after) * 0.75) / (1024 * 1024); // b64 → ~0.75 bytes/char
+  toast(
+    changed
+      ? `${changed} photo(s) compressée(s) · ~${savedMb.toFixed(1)} Mo libérés.`
+      : "Photos déjà au minimum — rien à compresser.",
+    { kind: "info" }
+  );
+}
+document.getElementById("photo-compress")?.addEventListener("click", compressAllPhotos);
+window.addEventListener("agrivision:compress-photos", compressAllPhotos);
 
 // Floating Action Button — primary mobile action.
 // Default: open camera. Once we're mid-conversation, switches to opening the drawer to half.
@@ -834,8 +880,9 @@ document.getElementById("report-btn")?.addEventListener("click", openChatSection
 
 // ============ Share with AgriVision (opt-in KV mirror) ============
 import { createShare, tradeDropboxIdTokenForSession, maybeRefreshSession } from "./share.js";
-import { renderPlansCard, handleBillingReturn } from "./billing.js";
-import { installGateToasts } from "./toast.js";
+import { renderPlansCard, handleBillingReturn, openPlansModal } from "./billing.js";
+import { installGateToasts, toast } from "./toast.js";
+import { checkStorageHealth } from "./storage-health.js";
 // Boot-time identity housekeeping:
 // 1. If an old id_token is present without a session, mint one (backfill for users
 //    who connected before /api/auth/dropbox/login existed).
@@ -875,12 +922,11 @@ window.addEventListener("agrivision:logout", () => share.render());
 // "Gating: make plan/login limits loud and actionable".
 installGateToasts();
 window.addEventListener("agrivision:open-plans", () => {
-  if (!_appMenuPanel) return;
-  _appMenuPanel.style.display = "block";
-  share.render();
-  share.fetchQuota();
-  renderPlansCard("plans-panel", (window.__lastPlanTier ||= "free"));
-  document.getElementById("plans-panel")?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+  // Refresh the quota so __lastPlanTier is current, then open the centered plans modal
+  // (the old corner dropdown was easy to miss — especially on mobile). The modal hosts the
+  // plan list and the embedded Stripe Checkout, so the whole upgrade flow stays in-page.
+  share.fetchQuota?.();
+  openPlansModal(window.__lastPlanTier || "free");
 });
 window.addEventListener("agrivision:open-login", () => showTutorial({ startAtLogin: true }));
 
@@ -999,7 +1045,11 @@ window.DBX = DBX; // expose so the login panel's "Restaurer depuis AgriVision" c
 // ===== Wire save triggers on every data change =====
 const _origPlace = placePhotoMarker; // ensure marker re-renders don't loop
 function dbxOnChange() {
+  console.log("[save] change detected (parcels/photos/analysis) → scheduling save");
   DBX.schedule();
+  // Watch local storage as it grows with use (caches + prefs); warn once it nears the cap.
+  // Cheap + de-duped per session, so calling it on every data change is fine.
+  checkStorageHealth();
 }
 
 // Patch photo lifecycle: existing handlers stay; we just observe via wrapping.
@@ -1125,3 +1175,8 @@ installMapClickRouter({
   flashLockHint: parcels.flashLockHint,
   showZoomTooLowMessage: parcels.showZoomTooLowMessage,
 });
+
+// Proactive local-storage quota check at boot — warns once if the store is already near full
+// from a previous session (caches accumulate across reloads). Deferred so the toast host and
+// login state are ready. Subsequent checks ride on dbxOnChange.
+setTimeout(() => checkStorageHealth(), 2000);

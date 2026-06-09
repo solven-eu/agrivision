@@ -214,7 +214,10 @@ export function installParcels(app) {
       if (app.selectedParcels.has(id)) app.selectedParcels.delete(id);
       else {
         const cap = maxParcelsForCurrentPlan();
-        if (app.selectedParcels.size >= cap) {
+        // Always allow the FIRST parcel, whatever the plan cap (and whatever its surface) — a
+        // user must be able to document at least one field, even a very large one, to get any
+        // value from the app. The cap only gates selecting ADDITIONAL parcels beyond the first.
+        if (app.selectedParcels.size >= 1 && app.selectedParcels.size >= cap) {
           // Over plan: reject the addition (nothing sticks on the map) and surface a loud,
           // actionable toast with an upgrade path — see CLAUDE.md "Gating". The enforcement
           // boundary just emits the event; toast.js renders it.

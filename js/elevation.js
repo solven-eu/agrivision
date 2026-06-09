@@ -10,6 +10,8 @@
 // Cached in localStorage per ~10m coordinate bucket. Altitude doesn't change, so the
 // cache TTL is essentially "forever" (we set 90 days as a sanity reset).
 
+import { safeSetItem } from "./storage-health.js";
+
 const CACHE_PREFIX = "alt:";
 const CACHE_TTL_MS = 90 * 24 * 3600 * 1000;
 
@@ -37,7 +39,7 @@ export async function fetchAltitude(lat, lon) {
     const alt = Array.isArray(j.elevations) ? j.elevations[0] : null;
     if (alt == null || !isFinite(alt)) return null;
     const rounded = Math.round(alt);
-    localStorage.setItem(k, JSON.stringify({ fetchedAt: Date.now(), altitude: rounded }));
+    safeSetItem(k, JSON.stringify({ fetchedAt: Date.now(), altitude: rounded }));
     return rounded;
   } catch (e) {
     console.warn("[elevation] fetch error:", e.message);

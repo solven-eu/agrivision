@@ -47,7 +47,10 @@ export function toast(message, opts = {}) {
     const btn = document.createElement("button");
     btn.textContent = action;
     btn.style.cssText = "font-size:12px;padding:6px 12px;white-space:nowrap";
-    btn.onclick = () => {
+    btn.onclick = (e) => {
+      // Stop the click bubbling to document-level "click-outside closes me" handlers (e.g. the
+      // app menu) — otherwise the panel this action opens is closed again by the same click.
+      e.stopPropagation();
       dismiss();
       onAction();
     };

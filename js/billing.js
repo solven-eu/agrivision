@@ -1,10 +1,14 @@
-// AgriVision RE — Stripe billing client. Trades a logged-in AgriVision session for
-// a Stripe Checkout URL; redirects the user to Stripe-hosted Checkout for the actual
-// payment flow. Webhook → Worker → KV updates the user's plan; the client just polls
-// /api/share/quota afterwards to see the new tier.
+// AgriVision RE — Stripe billing client. Trades a logged-in AgriVision session for a Stripe
+// Checkout session. Default UX is **Embedded Checkout**: Stripe.js mounts the payment form
+// inside our own centered modal (`openPlansModal`) — no full-page redirect. The hosted-redirect
+// flow (`startCheckout`) is kept as a fallback when Stripe.js / the publishable key isn't
+// available. Either way: webhook → Worker → KV updates the user's plan; on a successful payment
+// Stripe redirects the top window to `?billing=success`, picked up by `handleBillingReturn`,
+// which then polls /api/share/quota to surface the new tier.
 
-import { WORKER_URL } from "./config.js";
+import { WORKER_URL, STRIPE_PUBLISHABLE_KEY } from "./config.js";
 import { PLAN_FEATURES, hasFeature } from "./plan-features.js";
+import { safeSetItem } from "./storage-health.js";
 
 // Re-exported so other modules don't need to import plan-features directly.
 export { hasFeature, PLAN_FEATURES };
@@ -119,7 +123,7 @@ export async function fetchStripePrices() {
     }
     const j = await r.json();
     _pricesMemo = j.prices || {};
-    localStorage.setItem(PRICE_CACHE_KEY, JSON.stringify({ fetchedAt: Date.now(), prices: _pricesMemo }));
+    safeSetItem(PRICE_CACHE_KEY, JSON.stringify({ fetchedAt: Date.now(), prices: _pricesMemo }));
     return _pricesMemo;
   } catch (e) {
     console.warn("[billing] price fetch error:", e.message);
@@ -147,9 +151,10 @@ function authHeader() {
   return s ? { authorization: `Bearer ${s}` } : null;
 }
 
-// Start a Stripe Checkout flow for the given lookup_key. Redirects the page to Stripe
-// (no popup — Stripe Checkout uses full-page redirect). On return, ?billing=success
-// or ?billing=cancel is appended to the URL; the boot-time handler picks it up.
+// Start a HOSTED Stripe Checkout flow for the given lookup_key — full-page redirect to
+// Stripe. Fallback path used by the embedded modal when Stripe.js / the publishable key
+// isn't available. On return, ?billing=success or ?billing=cancel is appended to the URL;
+// the boot-time handler picks it up.
 export async function startCheckout(lookupKey) {
   if (!WORKER_URL) {
     alert("WORKER_URL non configuré — impossible d'initier le paiement.");
@@ -224,7 +229,188 @@ export function handleBillingReturn(onSuccess) {
   window.history.replaceState({}, document.title, clean);
 }
 
-// Render the plans card inside the host element. Click on a plan → startCheckout.
+// ============ Embedded Checkout (Stripe.js mounted in our own modal) ============
+
+// Lazy-load Stripe.js once and resolve the global `Stripe` constructor. Returns null if the
+// script can't be loaded (offline / CSP) so callers can fall back to the hosted redirect.
+let _stripeJsPromise = null;
+function loadStripeJs() {
+  if (window.Stripe) return Promise.resolve(window.Stripe);
+  if (_stripeJsPromise) return _stripeJsPromise;
+  _stripeJsPromise = new Promise((resolve) => {
+    const s = document.createElement("script");
+    s.src = "https://js.stripe.com/v3/";
+    s.async = true;
+    s.onload = () => resolve(window.Stripe || null);
+    s.onerror = () => resolve(null);
+    document.head.appendChild(s);
+  });
+  return _stripeJsPromise;
+}
+
+// Ask the Worker for an EMBEDDED Checkout session → { client_secret }. Returns null on any
+// failure (the caller falls back to hosted redirect). The return_url must carry the
+// {CHECKOUT_SESSION_ID} template — Stripe redirects the top window there after success.
+async function createEmbeddedSession(lookupKey) {
+  if (!WORKER_URL) return null;
+  const auth = authHeader();
+  if (!auth) {
+    alert("Connecte-toi avec Dropbox avant de passer à un plan payant.");
+    return null;
+  }
+  try {
+    const r = await fetch(`${WORKER_URL.replace(/\/$/, "")}/api/billing/checkout`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...auth },
+      body: JSON.stringify({
+        lookup_key: lookupKey,
+        ui_mode: "embedded",
+        return_url:
+          returnUrlBase() +
+          "?billing=success&plan=" +
+          encodeURIComponent(lookupKey) +
+          "&session_id={CHECKOUT_SESSION_ID}",
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.client_secret) {
+      console.warn("[billing] embedded session failed:", j.error || r.status);
+      return null;
+    }
+    return j.client_secret;
+  } catch (e) {
+    console.warn("[billing] embedded session error:", e.message);
+    return null;
+  }
+}
+
+// ---- The plans modal: a centered overlay with two screens (plan list ↔ embedded checkout) ----
+let _modalEl = null;
+let _activeCheckout = null; // live Stripe EmbeddedCheckout instance (must be destroyed on close)
+
+function destroyActiveCheckout() {
+  if (_activeCheckout) {
+    try {
+      _activeCheckout.destroy();
+    } catch {}
+    _activeCheckout = null;
+  }
+}
+
+function closePlansModal() {
+  destroyActiveCheckout();
+  _modalEl?.remove();
+  _modalEl = null;
+  document.removeEventListener("keydown", _onModalEsc);
+}
+
+function _onModalEsc(e) {
+  if (e.key === "Escape") closePlansModal();
+}
+
+// Build (or reuse) the modal shell and return its mutable parts. Backdrop click + ✕ + Esc close.
+function ensureModalShell() {
+  if (_modalEl) return _modalEl._parts;
+  const overlay = document.createElement("div");
+  overlay.style.cssText =
+    "position:fixed;inset:0;z-index:10070;display:flex;align-items:center;justify-content:center;" +
+    "background:rgba(0,0,0,.55);padding:16px;overflow-y:auto";
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) closePlansModal();
+  });
+
+  const card = document.createElement("div");
+  card.style.cssText =
+    "background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:12px;" +
+    "width:min(460px,96vw);max-height:92vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,.5)";
+  card.addEventListener("click", (e) => e.stopPropagation());
+
+  const head = document.createElement("div");
+  head.style.cssText =
+    "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;" +
+    "border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--panel);z-index:1";
+  const title = document.createElement("div");
+  title.style.cssText = "font-weight:700;font-size:15px";
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "secondary";
+  closeBtn.textContent = "✕";
+  closeBtn.style.cssText = "font-size:13px;padding:4px 10px;line-height:1";
+  closeBtn.onclick = closePlansModal;
+  head.append(title, closeBtn);
+
+  const body = document.createElement("div");
+  body.style.cssText = "padding:14px 16px";
+
+  card.append(head, body);
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+  document.addEventListener("keydown", _onModalEsc);
+
+  _modalEl = overlay;
+  _modalEl._parts = { title, body };
+  return _modalEl._parts;
+}
+
+// Screen 1: the plan list. Reuses renderPlansCard so there's a single source of plan markup.
+function showPlanListScreen(currentTier) {
+  destroyActiveCheckout();
+  const { title, body } = ensureModalShell();
+  title.textContent = "Choisir un plan";
+  body.innerHTML = `<div id="plans-modal-card"></div>`;
+  renderPlansCard("plans-modal-card", currentTier);
+}
+
+// Screen 2: embedded checkout for one price. Falls back to hosted redirect if Stripe.js or the
+// session can't be set up.
+async function showCheckoutScreen(lookupKey, currentTier) {
+  destroyActiveCheckout();
+  const { title, body } = ensureModalShell();
+  const plan = PLANS.find((p) => p.lookup_key === lookupKey);
+  title.textContent = plan ? plan.label : "Paiement";
+  body.innerHTML = `
+    <button id="plans-modal-back" class="secondary" style="font-size:12px;padding:4px 10px;margin-bottom:10px">← Retour aux plans</button>
+    <div id="embedded-checkout-mount" style="min-height:120px"></div>
+    <div id="embedded-checkout-status" class="small" style="color:var(--muted);margin-top:8px">Chargement du paiement sécurisé…</div>`;
+  body.querySelector("#plans-modal-back").onclick = () => showPlanListScreen(currentTier);
+  const statusEl = body.querySelector("#embedded-checkout-status");
+
+  const Stripe = STRIPE_PUBLISHABLE_KEY ? await loadStripeJs() : null;
+  const clientSecret = Stripe ? await createEmbeddedSession(lookupKey) : null;
+  if (!Stripe || !clientSecret) {
+    // Embedded path unavailable → fall back to the hosted redirect so the user can still pay.
+    if (statusEl) statusEl.textContent = "Redirection vers le paiement sécurisé Stripe…";
+    closePlansModal();
+    startCheckout(lookupKey);
+    return;
+  }
+  try {
+    const stripe = Stripe(STRIPE_PUBLISHABLE_KEY);
+    const checkout = await stripe.initEmbeddedCheckout({ clientSecret });
+    // If the user closed the modal while we were awaiting, don't mount a now-orphaned instance.
+    if (!_modalEl) {
+      try {
+        checkout.destroy();
+      } catch {}
+      return;
+    }
+    _activeCheckout = checkout;
+    statusEl?.remove();
+    checkout.mount("#embedded-checkout-mount");
+  } catch (e) {
+    console.warn("[billing] embedded mount error:", e.message);
+    if (statusEl) statusEl.textContent = "Redirection vers le paiement sécurisé Stripe…";
+    closePlansModal();
+    startCheckout(lookupKey);
+  }
+}
+
+// Public entry point: open the plans modal (used by the "Améliorer mon plan" gate toast and the
+// hamburger menu). Centered + actionable, unlike the old corner dropdown.
+export function openPlansModal(currentTier) {
+  showPlanListScreen(currentTier || "free");
+}
+
+// Render the plans card inside the host element. Click on a plan → embedded checkout modal.
 // Renders immediately with the fallback price strings, then re-renders once the
 // live Stripe prices arrive (cached in localStorage so subsequent boots are instant).
 export function renderPlansCard(hostId, currentTier) {
@@ -259,7 +445,7 @@ export function renderPlansCard(hostId, currentTier) {
       ${livePrices ? "" : `<div class="small" style="color:var(--muted);margin-top:6px;font-style:italic">Récupération des prix Stripe…</div>`}
     `;
     host.querySelectorAll(".plan-buy").forEach((b) => {
-      b.addEventListener("click", () => startCheckout(b.dataset.lookup));
+      b.addEventListener("click", () => showCheckoutScreen(b.dataset.lookup, currentTier));
     });
     document.getElementById("open-portal-btn")?.addEventListener("click", openPortal);
   };

@@ -352,16 +352,8 @@
         <div id="status"></div>
 
         <details class="advanced">
-          <summary>2. Filtrer cultures (RPG)</summary>
-          <div class="small" style="margin-bottom: 6px">
-            Tout est affiché par défaut. Cliquer pour exclure/inclure.
-          </div>
-          <div class="chips" id="chips"></div>
-          <div style="margin-top: 6px; display: flex; gap: 6px">
-            <button class="secondary" id="chips-all" style="font-size: 11px; padding: 4px 8px">Tout</button>
-            <button class="secondary" id="chips-none" style="font-size: 11px; padding: 4px 8px">Aucun</button>
-          </div>
-          <details style="margin-top: 6px">
+          <summary>2. Couches RPG (légende)</summary>
+          <details style="margin-top: 6px" open>
             <summary>Légende des couleurs (RPG)</summary>
             <div style="margin-top: 6px; display: flex; flex-direction: column; gap: 4px; font-size: 11px">
               <div style="display: flex; align-items: center; gap: 6px">
@@ -459,6 +451,7 @@
           <div style="margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap">
             <button id="photo-camera" class="primary-capture" type="button">📷 Capturer</button>
             <button id="photo-file" class="secondary" type="button">🖼 Choisir un fichier</button>
+            <button id="photo-compress" class="secondary" type="button" title="Réduire la qualité des photos pour libérer le stockage local">🗜 Réduire la qualité</button>
           </div>
           <input id="photo" type="file" accept="image/*" multiple hidden />
           <input id="photo-cam" type="file" accept="image/*" capture="environment" hidden />

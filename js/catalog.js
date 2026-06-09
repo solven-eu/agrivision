@@ -2,6 +2,8 @@
 // CROP_CATALOG is keyed by RPG code_cultu. Loaded from catalog.json at startup
 // over the inline defaults (which act as offline fallback).
 
+import { safeSetItem } from "./storage-health.js";
+
 // Inline defaults — overridden by catalog.json on startup.
 export const CROP_CATALOG = {
   BAN: {
@@ -137,7 +139,7 @@ export async function lookupTaxonImage(sciName, commonFr, catalog = CROP_CATALOG
         const url = j.thumbnail?.source || j.originalimage?.source;
         if (url) {
           const src = `Wikipedia ${lang.toUpperCase()}`;
-          localStorage.setItem(cacheKey, `${src}|${url}`);
+          safeSetItem(cacheKey, `${src}|${url}`);
           return { url, source: src };
         }
       } catch {}
@@ -158,14 +160,14 @@ export async function lookupTaxonImage(sciName, commonFr, catalog = CROP_CATALOG
       const j = await r.json();
       const url = j.results?.[0]?.default_photo?.medium_url || j.results?.[0]?.default_photo?.square_url;
       if (url) {
-        localStorage.setItem(cacheKey, url);
+        safeSetItem(cacheKey, url);
         return { url, source: "iNaturalist" };
       }
     } catch {}
-    localStorage.setItem(cacheKey, "MISS");
+    safeSetItem(cacheKey, "MISS");
   }
 
-  for (const k of tryKeys) localStorage.setItem(`img:${k}`, "MISS");
+  for (const k of tryKeys) safeSetItem(`img:${k}`, "MISS");
   return null;
 }
 

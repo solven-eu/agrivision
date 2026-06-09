@@ -2415,13 +2415,27 @@ async function billingCheckout(req, env, origin) {
   }
 
   // Create the Checkout Session.
+  // `ui_mode: "embedded"` (requested by the client) keeps the payment form inside our own
+  // modal via Stripe.js — no full-page redirect. It returns a `client_secret` instead of a
+  // hosted `url`, and uses a single `return_url` (Stripe redirects the top window there only
+  // AFTER a successful payment). The hosted flow (default) is kept as a fallback.
+  const embedded = body.ui_mode === "embedded";
   const p = new URLSearchParams();
   p.append("mode", "subscription");
   p.append("customer", customerId);
   p.append("line_items[0][price]", priceId);
   p.append("line_items[0][quantity]", "1");
-  p.append("success_url", body.success_url || "https://example.com/?billing=success");
-  p.append("cancel_url", body.cancel_url || "https://example.com/?billing=cancel");
+  if (embedded) {
+    p.append("ui_mode", "embedded");
+    // Must contain the {CHECKOUT_SESSION_ID} template; Stripe substitutes the real id.
+    p.append(
+      "return_url",
+      body.return_url || "https://example.com/?billing=success&session_id={CHECKOUT_SESSION_ID}"
+    );
+  } else {
+    p.append("success_url", body.success_url || "https://example.com/?billing=success");
+    p.append("cancel_url", body.cancel_url || "https://example.com/?billing=cancel");
+  }
   // Don't set payment_method_types: Checkout then auto-shows the methods enabled in the
   // Stripe Dashboard (CB, SEPA, etc.) based on the customer's country. Note:
   // `automatic_payment_methods` is a PaymentIntent param and is INVALID on Checkout Sessions.
@@ -2432,6 +2446,11 @@ async function billingCheckout(req, env, origin) {
   p.append("subscription_data[metadata][tier]", tier);
   const sr = await stripeApi(env, "POST", "/v1/checkout/sessions", p);
   const sj = await sr.json();
+  if (embedded) {
+    if (!sj.client_secret)
+      return json({ error: "embedded checkout session creation failed", details: sj }, 500, origin);
+    return json({ client_secret: sj.client_secret, session_id: sj.id }, 200, origin);
+  }
   if (!sj.url) return json({ error: "checkout session creation failed", details: sj }, 500, origin);
   return json({ checkout_url: sj.url, session_id: sj.id }, 200, origin);
 }
