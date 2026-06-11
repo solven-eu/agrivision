@@ -5,6 +5,7 @@
 
 import { WORKER_URL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL } from "./config.js";
 import { CHAT_SYSTEM_PROMPT, buildContextBlock } from "./prompts.js";
+import { toast } from "./toast.js";
 import { aggregateParcels } from "./state.js";
 import { robustParseJson } from "./util.js";
 import { shareAttribHeaders } from "./share.js";
@@ -302,7 +303,7 @@ export function createChat(app) {
     },
 
     add_parcel: async () => {
-      alert("Cliquez une parcelle supplémentaire sur la carte (zoom ≥ 12).");
+      toast("Clique une parcelle supplémentaire sur la carte (zoom ≥ 12).", { kind: "info" });
       return null;
     },
 
@@ -443,6 +444,7 @@ export function createChat(app) {
             strip.appendChild(missing);
             continue;
           }
+          if (!p.dataUrl) continue; // blob still loading during restore → skip (avoids GET /null 404)
           const thumb = document.createElement("img");
           thumb.src = p.dataUrl;
           thumb.alt = p.name;
@@ -508,6 +510,30 @@ export function createChat(app) {
       }
       // Two always-available user-initiated forks (replaces the vague "Autre…").
       // Both open the same composer; the photo variant pre-triggers the file picker.
+      const askBtn = document.createElement("button");
+      askBtn.className = "chat-action";
+      askBtn.textContent = "✏ Poser une question";
+      askBtn.onclick = () => {
+        freeTextOpen = true;
+        renderChat();
+      };
+      actEl.appendChild(askBtn);
+
+      const photoBtn = document.createElement("button");
+      photoBtn.className = "chat-action";
+      photoBtn.textContent = "📷 Envoyer une photo";
+      photoBtn.onclick = async () => {
+        freeTextOpen = true;
+        renderChat();
+        await showPhotoSourceChooser();
+      };
+      actEl.appendChild(photoBtn);
+    }
+    // Empty state (no conversation yet): offer the composer directly so the user can ask a
+    // question or get help WITHOUT first selecting a parcel/photo — e.g. "comment utiliser
+    // l'app ?" or attaching a document. The "Démarrer l'analyse" button stays input-gated (an
+    // analysis with nothing to analyse is meaningless); this is the free-form chat entry point.
+    if (app.conversation.length === 0 && !chatBusy) {
       const askBtn = document.createElement("button");
       askBtn.className = "chat-action";
       askBtn.textContent = "✏ Poser une question";

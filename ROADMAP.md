@@ -157,6 +157,47 @@ Worker → HMAC-verify own signature only, read `sub` claim, done.
 
 **Until v1 lands**, anything that depends on identified-user state (share quotas, server-side token limits, cross-device sync) is best treated as a tampering-tolerant PoC. Don't expose data that's sensitive on a per-user basis through endpoints that authenticate via the unverified id_token path.
 
+## Email verification — let unverified-email users prove ownership
+
+Today (shipped): the session JWT carries `email_verified` (Dropbox/Google assert it; **Facebook is always `false`**). Organization membership by **email** (domain `email_pattern`, or a roster email) is granted **only to verified emails** — so a forged/unverified address can't claim someone else's sponsored plan (`worker/worker.js` `orgsForAccount`, `require_verified`). The dashboard (`js/share.js`) flags an unverified email with a red banner.
+
+**The gap:** a legitimate Facebook user (or anyone whose provider didn't assert verification) currently has **no way to verify** their email, so they can never inherit a domain/org plan even when the address is really theirs.
+
+**Goal:** a standard double-opt-in flow that lets a signed-in user prove they own their email, flipping `email_verified → true` for that account.
+
+**Flow:**
+
+```
+SPA  → "Vérifier mon email" button (shown only when email_verified is false)
+SPA  → POST /api/auth/email/verify-start   (Bearer <agri_session>)
+Worker:
+  - token = random 32 bytes (urlsafe)
+  - KV put `emailverify/<token>` → { sub, email_lc, exp:+30min }  (single-use)
+  - send email to the address with a link: https://agrivision.re/app/?verify_email=<token>
+SPA (on load, ?verify_email=<token> present):
+  → POST /api/auth/email/verify-complete { token }   (Bearer <agri_session>)
+Worker:
+  - look up token, check exp + that token.sub === session.sub (must be the same logged-in user)
+  - persist verification: account/<sub>.json.email_verified_for[email_lc] = true
+  - delete the token (single-use)
+  - re-mint the session JWT with email_verified:true → return it; SPA swaps agri_session
+  → org/domain matching now applies on the next request
+```
+
+**Design notes / decisions to make:**
+
+- **Sender infrastructure is the only real dependency.** Cloudflare Email Sending (Workers binding or REST) with a verified `agrivision.re` domain (SPF/DKIM/DMARC), or a transactional provider. See the `cloudflare-email-service` skill.
+- **Bind verification to the logged-in `sub`**, not just the email — the token must only complete for the same account that started it (prevents a verified link being replayed by another account to "verify" an email they don't control).
+- **Persist on the account record** (`account/<sub>.json`), and prefer the persisted flag over the provider claim when minting future sessions — so a Facebook user stays verified across re-logins even though Facebook keeps asserting `false`.
+- **Email-change/anchor interaction:** verifying here may also let the user *claim the email anchor* (`anchor/<sub>`) they couldn't claim at Facebook login — reconcile with `resolveEmailAnchor` (don't let it steal an anchor already owned by another verified account).
+- **Rate-limit verify-start** (per sub + per email) to avoid being an open email relay; single-use + short-TTL tokens.
+
+**Phasing:**
+
+- v0 (now): verification is read-only from the IdP; unverified users are flagged but can't self-verify. Org-by-email needs Dropbox/Google.
+- v1: the flow above (verify-start + verify-complete + Cloudflare Email Sending + the "Vérifier mon email" button).
+- v2: also use it for email-change (move the anchor to a newly-verified address) and for magic-link login as an IdP-independent path.
+
 ## Treatments catalog — cross-disease coverage + combo-pass deduplication
 
 Today every disease in Claude's response carries its own `treatments` array with self-contained `name`, `success_probability_0_1`, `recovery_pct`, and `cost_breakdown`. The combined-strategy panel in `metrics.js` does multiplicative loss modeling on top of that, which is honest about probabilities, **but** it still has two pretend-it's-not-there gaps:

@@ -25,6 +25,10 @@ import { handleAiAccessError } from "./billing.js";
  */
 export function createAnalyze(app) {
   let lastAnalyzedFingerprint = null;
+  // Once the Worker reports MISTRAL_API_KEY missing (503), remember it for the session and stop
+  // re-attempting Mistral — otherwise every photo analysis fires a fresh 503 into the console
+  // before falling back to Anthropic. One 503 per session at most.
+  let mistralUnavailable = false;
 
   // Hash of inputs that would change the analysis output.
   function inputFingerprint() {
@@ -427,16 +431,22 @@ ${schema}`;
       system: tightSystem,
       messages: [{ role: "user", content }],
     };
-    let providerUsed = "mistral";
-    let modelUsed = MISTRAL_MODEL;
+    let providerUsed = mistralUnavailable ? "anthropic" : "mistral";
+    let modelUsed = mistralUnavailable ? ANTHROPIC_MODEL : MISTRAL_MODEL;
     let result;
     try {
-      result = await ask("mistral", payload);
-      // 503 = MISTRAL_API_KEY not configured on the Worker → automatic Anthropic fallback.
-      if (!result.ok && result.status === 503) {
+      if (mistralUnavailable) {
+        // Already known unavailable this session → go straight to Anthropic (no 503 noise).
         result = await ask("anthropic", { ...payload, system: SYSTEM_PROMPT });
-        providerUsed = "anthropic";
-        modelUsed = ANTHROPIC_MODEL;
+      } else {
+        result = await ask("mistral", payload);
+        // 503 = MISTRAL_API_KEY not configured on the Worker → remember + Anthropic fallback.
+        if (!result.ok && result.status === 503) {
+          mistralUnavailable = true;
+          result = await ask("anthropic", { ...payload, system: SYSTEM_PROMPT });
+          providerUsed = "anthropic";
+          modelUsed = ANTHROPIC_MODEL;
+        }
       }
       if (!result.ok) {
         if (handleAiAccessError(result.body)) return;

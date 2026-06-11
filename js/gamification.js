@@ -8,7 +8,7 @@
 // All metrics are derived client-side from existing state. The only new input is an optional
 // "surface totale de l'exploitation" the user can type, used to show mapped-coverage ratio.
 
-import { pointInGeom } from "./util.js";
+import { pointInGeom, destPoint } from "./util.js";
 import { parcelArea, aggregateParcels } from "./state.js";
 
 const LS_TOTAL_SURFACE = "agri_total_surface_ha";
@@ -37,15 +37,44 @@ export function createGamification(app) {
     return isFinite(v) && v > 0 ? v : null;
   }
 
-  // Fraction of selected parcels that have at least one photo whose position falls inside
-  // the parcel polygon — a crude but honest "are your photos actually covering the fields?".
+  // Does a photo "cover" a parcel? You normally photograph a field from OUTSIDE it, aiming in — so
+  // the photo's GPS being outside the polygon is normal and must still count. We accept a photo if:
+  //   1. it was taken INSIDE the parcel, or
+  //   2. it has a direction and its line of sight (a cone around the aim) enters the parcel within
+  //      a realistic framing distance (~10–140 m), or
+  //   3. it has no direction but is close to the parcel (a ring up to ~60 m around the position).
+  function photoCoversParcel(ph, geom) {
+    if (pointInGeom([ph.lon, ph.lat], geom)) return true; // 1. taken inside
+    if (ph.direction != null) {
+      // 2. aimed into the field — sample a ~60° cone around the heading.
+      for (const dDeg of [-30, -15, 0, 15, 30]) {
+        const bearing = ph.direction + dDeg;
+        for (let d = 10; d <= 140; d += 15) {
+          const [plat, plon] = destPoint(ph.lat, ph.lon, bearing, d);
+          if (pointInGeom([plon, plat], geom)) return true;
+        }
+      }
+      return false;
+    }
+    // 3. no direction → proximity ring (was the photographer near the field edge?).
+    for (let b = 0; b < 360; b += 45) {
+      for (const d of [15, 30, 45, 60]) {
+        const [plat, plon] = destPoint(ph.lat, ph.lon, b, d);
+        if (pointInGeom([plon, plat], geom)) return true;
+      }
+    }
+    return false;
+  }
+
+  // Fraction of selected parcels that have at least one photo covering them (inside, aimed-in, or
+  // close by) — an honest "are your photos actually documenting the fields?".
   function photoCoverage(parcels, photos) {
     const located = photos.filter((p) => p.lat != null && p.lon != null);
     if (parcels.size === 0) return { ratio: 0, covered: 0, total: 0, located: located.length };
     let covered = 0;
     for (const parcel of parcels.values()) {
       if (!parcel.geometry) continue;
-      const hit = located.some((ph) => pointInGeom([ph.lon, ph.lat], parcel.geometry));
+      const hit = located.some((ph) => photoCoversParcel(ph, parcel.geometry));
       if (hit) covered++;
     }
     return { ratio: parcels.size ? covered / parcels.size : 0, covered, total: parcels.size, located: located.length };
@@ -70,6 +99,21 @@ export function createGamification(app) {
     const ages = located.map((p) => daysSince(p.takenAt)).filter((d) => d != null);
     const newestAge = ages.length ? Math.min(...ages) : null;
 
+    // 4b. Proper tagging: a photo is "well tagged" when it has BOTH a GPS position and a date —
+    // without them the AI can't situate the observation on a parcel or reason about timing.
+    const wellTagged = photos.filter((p) => p.lat != null && p.lon != null && p.takenAt).length;
+    const untagged = photos.length - wellTagged;
+    const tagRatio = photos.length ? wellTagged / photos.length : 1;
+    // Report precisely what's missing (a placed-but-undated photo has GPS — don't claim otherwise).
+    const noGps = photos.filter((p) => p.lat == null || p.lon == null).length;
+    const noDate = photos.filter((p) => !p.takenAt).length;
+    const tagMissingDetail = [
+      noGps ? `${noGps} sans position GPS` : "",
+      noDate ? `${noDate} sans date` : "",
+    ]
+      .filter(Boolean)
+      .join(", ");
+
     // 5. Coverage
     const cov = photoCoverage(parcels, photos);
 
@@ -92,7 +136,7 @@ export function createGamification(app) {
         key: "surface",
         label: "Couverture de l'exploitation",
         score: surfaceRatio == null ? 0 : surfaceRatio,
-        weight: 0.15,
+        weight: 0.1,
         detail:
           surfaceRatio == null
             ? "Renseigne ta surface totale pour situer ta progression"
@@ -113,7 +157,7 @@ export function createGamification(app) {
         key: "photo_fresh",
         label: "Fraîcheur des photos",
         score: freshnessScore(newestAge, 14, 60),
-        weight: 0.15,
+        weight: 0.1,
         detail:
           newestAge == null
             ? "Aucune photo datée"
@@ -121,13 +165,25 @@ export function createGamification(app) {
         cta: newestAge != null && newestAge <= 30 ? null : { label: "Photographier", section: "photos-section" },
       },
       {
+        key: "photo_tagging",
+        label: "Photos taguées (GPS + date)",
+        score: tagRatio,
+        weight: 0.1,
+        detail: !photos.length
+          ? "Tes photos seront situées et datées pour l'analyse"
+          : untagged === 0
+            ? "Toutes tes photos ont une position et une date"
+            : `${tagMissingDetail} (sur ${photos.length}) — complète pour situer et dater tes observations`,
+        cta: photos.length && untagged > 0 ? { label: "Taguer les photos", section: "photos-section" } : null,
+      },
+      {
         key: "coverage",
         label: "Couverture photo des parcelles",
         score: cov.total ? cov.ratio : 0,
         weight: 0.2,
         detail: cov.total
-          ? `${cov.covered}/${cov.total} parcelle(s) avec une photo localisée`
-          : "Sélectionne des parcelles puis place des photos dessus",
+          ? `${cov.covered}/${cov.total} parcelle(s) avec une photo (sur place ou orientée vers le champ)`
+          : "Sélectionne des parcelles puis place/oriente des photos vers elles",
         cta: cov.total && cov.ratio < 1 ? { label: "Compléter", section: "photos-section" } : null,
       },
       {
@@ -144,6 +200,14 @@ export function createGamification(app) {
       },
     ];
     const total = items.reduce((a, it) => a + it.score * it.weight, 0);
+    // Order by IMPACT ON THE SCORE: how many points completing this item would add = weight×(1−score).
+    // Biggest score-to-gain first → the checklist always surfaces the most useful next action on top;
+    // already-complete items (impact 0) sink to the bottom. (Display order only — the score itself
+    // is order-independent.)
+    items.forEach((it) => {
+      it.impact = it.weight * (1 - it.score);
+    });
+    items.sort((a, b) => b.impact - a.impact);
     return { items, score: Math.round(total * 100) };
   }
 

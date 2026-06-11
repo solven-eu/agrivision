@@ -1,64 +1,24 @@
-// AgriVision RE — persistence module.
-// Dropbox PKCE OAuth + App-folder save/load + localStorage status badge.
+// AgriVision RE — persistence module (storage-AGNOSTIC core).
+// Session/manifest/local-mirror/save-scheduling/restore + the storage panel. The actual cloud I/O
+// is delegated to a pluggable storage DRIVER (one module per provider under ./storage/), selected
+// at runtime via `activeDriver`. Adding a provider = a new driver module; this file is unchanged.
 //
-// Externals are passed in via the `app` object, populated by main.js. This keeps the module
-// portable: it doesn't reach into main.js's scope; main.js explicitly wires the dependencies.
+// Driver interface (see ./storage/dropbox.js, ./storage/gdrive.js):
+//   { id, label, isEnabled(), isConnected(), accountLabel(), startAuth(), disconnect(),
+//     uploadFile(path, body, mode), downloadFile(path) → Response, listSessions() → [{crop,id,path}],
+//     deleteFolder(path), registerPointer() }
+// All file ops are PATH-based (/crops/<crop>/cultures/<id>/culture.json, .../photos/<id>.<ext>);
+// each driver emulates that scheme on its own backend.
+//
+// Externals are passed in via the `app` object, populated by main.js.
 
-import { DROPBOX_APP_KEY, DROPBOX_REDIRECT_URI } from "./config.js";
-import {
-  tradeDropboxIdTokenForSession,
-  logoutSession,
-  registerStoragePointer,
-  loadFromAgriVision,
-} from "./share.js";
+import { loadFromAgriVision } from "./share.js";
 import { ensureSoilForSelected } from "./soil.js";
 import { ensureAltitudeForSelected } from "./elevation.js";
 import { safeSetItem } from "./storage-health.js";
-
-// Dropbox OAuth round-trip back to our app. Use the configured redirect only when its origin
-// matches the page (production); otherwise return null so the caller uses the manual code-paste
-// flow (localhost / file://, where this URL isn't registered). Mirrors googleRedirectUri().
-const DBX_MSG = "agri:dropbox-auth";
-function dropboxRedirectUri() {
-  if (DROPBOX_REDIRECT_URI) {
-    try {
-      if (new URL(DROPBOX_REDIRECT_URI).origin === location.origin) return DROPBOX_REDIRECT_URI;
-    } catch {}
-  }
-  // Other http(s) origins (e.g. localhost dev): the callback page sits next to index.html.
-  // Requires that exact URL to be registered in the Dropbox app console. file:// can't be a
-  // Dropbox redirect, so it keeps the manual code-paste fallback (return null).
-  if (location.protocol === "http:" || location.protocol === "https:") {
-    return location.origin + location.pathname.replace(/[^/]*$/, "") + "oauth-callback.html";
-  }
-  return null;
-}
-
-// Runs on every page load. If THIS window is the OAuth popup returning from Dropbox, the auth
-// code is in the query string (?code=…) — hand it to the opener (which holds the PKCE verifier)
-// and close. No-op for the normal app. Dropbox uses ?code (query); Google uses #id_token
-// (fragment), so the two popup completers never collide.
-function maybeCompleteDropboxPopup() {
-  if (!window.opener || window.opener === window) return;
-  const q = new URLSearchParams(location.search);
-  if (!q.has("code") && !q.has("error")) return;
-  try {
-    window.opener.postMessage(
-      {
-        type: DBX_MSG,
-        code: q.get("code") || null,
-        state: q.get("state") || null,
-        error: q.get("error") || null,
-      },
-      location.origin
-    );
-  } catch {}
-  try {
-    history.replaceState(null, "", location.pathname);
-  } catch {}
-  window.close();
-}
-maybeCompleteDropboxPopup();
+import { toast } from "./toast.js";
+import { createDropboxDriver } from "./storage/dropbox.js";
+import { createGDriveDriver } from "./storage/gdrive.js";
 
 /**
  * @param {object} app - dependency bundle:
@@ -77,10 +37,6 @@ maybeCompleteDropboxPopup();
  */
 export function createDbx(app) {
   const LS = {
-    token: "dbx_token",
-    refresh: "dbx_refresh",
-    verifier: "dbx_verifier",
-    state: "dbx_state",
     session: "agri_culture_id",
     crop: "agri_culture_crop",
     uploaded: "agri_uploaded_photos", // photoId → true (per culture)
@@ -88,27 +44,65 @@ export function createDbx(app) {
     // every change while the large photo bytes are rewritten only when they actually change:
     //   localSession: { manifest, cropCode, sessionId }   — parcels + photo METADATA + analysis…
     //   localPhotos:  [{ id, mime, b64 }]                 — inline photo bytes (the bulk)
-    // Together they let the whole session survive a reload WITHOUT Dropbox, and seed the upload
-    // when the user connects Dropbox later. See saveLocalManifest / restoreFromLocal.
+    // Together they let the whole session survive a reload WITHOUT any cloud, and seed the upload
+    // when the user connects a provider later. See saveLocalManifest / restoreFromLocal.
     localSession: "agri_local_session",
     localPhotos: "agri_local_photos",
+    activeProvider: "agri_storage_provider", // "dropbox" | "gdrive" — which cloud is active
   };
+
+  // ===== Storage drivers (one per provider). The agnostic core below talks only to activeDriver.
+  // onConnected fires after a successful (re)connect → mark active, re-render, schedule initial save.
+  const dropbox = createDropboxDriver({ onConnected: () => onProviderConnected("dropbox") });
+  const gdrive = createGDriveDriver({ onConnected: () => onProviderConnected("gdrive") });
+  const drivers = [dropbox, gdrive];
+  let activeDriver = null;
+  function driverById(id) {
+    return drivers.find((d) => d.id === id) || null;
+  }
+  function anyDriverEnabled() {
+    return drivers.some((d) => d.isEnabled());
+  }
+  function anyDriverConnected() {
+    return drivers.some((d) => d.isConnected());
+  }
+  // Active = the user's preferred provider if it's connected, else any connected one, else null.
+  function pickActiveDriver() {
+    const pref = localStorage.getItem(LS.activeProvider);
+    const prefDrv = pref ? driverById(pref) : null;
+    activeDriver = prefDrv && prefDrv.isConnected() ? prefDrv : drivers.find((d) => d.isConnected()) || null;
+    return activeDriver;
+  }
+  function setActiveProvider(id) {
+    const d = driverById(id);
+    if (!d) return;
+    activeDriver = d;
+    localStorage.setItem(LS.activeProvider, id);
+  }
+  function onProviderConnected(id) {
+    setActiveProvider(id);
+    renderPanel();
+    schedule(); // initial save
+  }
+  pickActiveDriver();
+
   // Signature of the photo bytes last written to LS.localPhotos — lets saveLocalManifest skip
   // re-serializing megabytes of base64 when only the manifest (parcels/analysis/chat) changed.
   let lastLocalPhotosSig = null;
   const state = {
-    enabled: !!DROPBOX_APP_KEY,
-    token: localStorage.getItem(LS.token) || null,
-    refresh: localStorage.getItem(LS.refresh) || null,
     sessionId: localStorage.getItem(LS.session) || null,
     cropCode: localStorage.getItem(LS.crop) || null, // path prefix /crops/<cropCode>/cultures/<id>
     uploaded: JSON.parse(localStorage.getItem(LS.uploaded) || "{}"),
     lastAnalysis: null,
     lastConversation: [],
     lastUserProfile: null,
-    // If we have a token at startup, an auto-reload is imminent. Block any save until it finishes.
-    suspendSave: !!localStorage.getItem(LS.token),
+    // An auto-reload is imminent at startup whenever there's anything to restore — a connected
+    // cloud OR a local mirror. Block saves until it finishes; otherwise the empty initial render
+    // triggers a schedule() that fires saveLocalManifest with empty state and WIPES the mirror
+    // before autoReload can restore it. (This is the no-cloud "lost on reload" bug.)
+    suspendSave: anyDriverConnected() || !!localStorage.getItem(LS.localSession),
     saveStatus: "idle", // idle | dirty | saving | saved | loading | error
+    baseHash: null, // content_hash of the remote version we loaded (for divergence detection)
   };
   const SAVE_BADGES = {
     idle: { txt: "—", color: "var(--muted)" },
@@ -176,257 +170,27 @@ export function createDbx(app) {
     localStorage.removeItem(LS.localSession);
     localStorage.removeItem(LS.localPhotos);
     lastLocalPhotosSig = null;
+    state.baseHash = null; // fresh culture — no remote version to diverge from yet
   }
   function persistUploaded() {
     localStorage.setItem(LS.uploaded, JSON.stringify(state.uploaded));
   }
 
-  // PKCE helpers
-  function b64url(buf) {
-    return btoa(String.fromCharCode(...new Uint8Array(buf)))
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "");
+  // ===== Cloud I/O routes through the active storage driver (Dropbox / Google Drive). =====
+  // Path-based ops; each driver emulates the /crops/<crop>/cultures/<id>/… scheme on its backend.
+  function uploadFile(path, body, mode) {
+    return activeDriver.uploadFile(path, body, mode);
   }
-  function randomVerifier() {
-    const a = new Uint8Array(64);
-    crypto.getRandomValues(a);
-    return b64url(a);
+  function downloadFile(path) {
+    if (!activeDriver) throw new Error("Aucun stockage connecté");
+    return activeDriver.downloadFile(path);
   }
-  async function challengeFor(verifier) {
-    const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-    return b64url(hash);
+  function deleteFolder(path) {
+    if (!activeDriver) throw new Error("Aucun stockage connecté");
+    return activeDriver.deleteFolder(path);
   }
-
-  async function startAuth() {
-    const verifier = randomVerifier();
-    sessionStorage.setItem(LS.verifier, verifier);
-    const challenge = await challengeFor(verifier);
-    const params = new URLSearchParams({
-      client_id: DROPBOX_APP_KEY,
-      response_type: "code",
-      code_challenge: challenge,
-      code_challenge_method: "S256",
-      token_access_type: "offline",
-      // Scopes. When `scope` is passed, Dropbox grants EXACTLY these (intersected with the
-      // app's enabled permissions), and rejects the whole request if any isn't enabled — so we
-      // list only what we actually use AND have enabled in the console:
-      //   openid + email   → id_token (JWT). Dropbox rejects `openid` alone: it must be paired
-      //                      with at least one of profile/email. The JWT's `sub` is the stable
-      //                      account_id the Worker verifies (no bearer forwarded).
-      //   files.metadata.read → files/list_folder (auto-enabled alongside files.content.read)
-      //   files.content.read  → files/download
-      //   files.content.write → files/upload, files/delete_v2
-      // NOTE: users/get_current_account (storage pointer) needs `account_info.read`; it's left
-      // out so login doesn't fail when that scope isn't enabled — the pointer is best-effort and
-      // degrades silently. Re-add `account_info.read` here once it's enabled in the console.
-      scope: "openid email files.metadata.read files.content.read files.content.write",
-    });
-    const redirectUri = dropboxRedirectUri();
-
-    // No registered redirect for this origin (localhost / file://) → manual code-paste flow:
-    // open Dropbox's code page in a new tab; the panel shows a paste box. Returns {manual:true}
-    // so the caller reveals that box.
-    if (!redirectUri) {
-      const url = `https://www.dropbox.com/oauth2/authorize?${params}`;
-      window.open(url, "_blank", "noopener");
-      return { manual: true };
-    }
-
-    // Seamless flow: Dropbox redirects a popup back to our app with ?code, the popup
-    // postMessages it here (maybeCompleteDropboxPopup), and we exchange it — no paste needed.
-    params.set("redirect_uri", redirectUri);
-    const state = randomVerifier();
-    sessionStorage.setItem(LS.state, state);
-    params.set("state", state);
-    const url = `https://www.dropbox.com/oauth2/authorize?${params}`;
-    // No "noopener" — the popup needs window.opener to hand the code back.
-    const popup = window.open(url, "agri_dropbox_login", "width=560,height=720");
-    if (!popup) {
-      // Popup blocked → full-page redirect (handled on return by handleDropboxRedirectReturn).
-      location.assign(url);
-      return { manual: false, redirected: true };
-    }
-
-    const code = await new Promise((resolve) => {
-      function cleanup() {
-        window.removeEventListener("message", onMsg);
-        clearInterval(timer);
-      }
-      function onMsg(ev) {
-        if (ev.origin !== location.origin || ev.data?.type !== DBX_MSG) return;
-        cleanup();
-        if (ev.data.error || ev.data.state !== state) return resolve(null);
-        resolve(ev.data.code || null);
-      }
-      window.addEventListener("message", onMsg);
-      const timer = setInterval(() => {
-        if (popup.closed) {
-          cleanup();
-          resolve(null);
-        }
-      }, 500);
-    });
-    sessionStorage.removeItem(LS.state);
-    if (!code) return { manual: false }; // cancelled / blocked / state mismatch
-    await exchangeCode(code);
-    renderPanel();
-    schedule(); // initial save
-    return { manual: false, done: true };
-  }
-
-  // Popup-blocked fallback: Dropbox brought the whole tab back with ?code and no opener. The
-  // PKCE verifier survives in this tab's sessionStorage, so finish the exchange here.
-  async function handleDropboxRedirectReturn() {
-    if (window.opener && window.opener !== window) return; // that's the popup, not us
-    const q = new URLSearchParams(location.search);
-    const code = q.get("code");
-    if (!code) return;
-    const okState = q.get("state") && q.get("state") === sessionStorage.getItem(LS.state);
-    try {
-      history.replaceState(null, "", location.pathname);
-    } catch {}
-    if (!okState) return;
-    sessionStorage.removeItem(LS.state);
-    try {
-      await exchangeCode(code);
-      renderPanel();
-      schedule();
-    } catch (e) {
-      console.warn("dropbox redirect exchange failed:", e.message);
-    }
-  }
-
-  async function exchangeCode(code) {
-    const verifier = sessionStorage.getItem(LS.verifier);
-    if (!verifier) throw new Error("Code verifier introuvable (relancer la connexion).");
-    const body = new URLSearchParams({
-      code,
-      grant_type: "authorization_code",
-      client_id: DROPBOX_APP_KEY,
-      code_verifier: verifier,
-    });
-    // Must match the redirect_uri sent to /authorize (Dropbox enforces this). dropboxRedirectUri()
-    // returns the same value the authorize step used, or null in the manual-paste flow.
-    const redirectUri = dropboxRedirectUri();
-    if (redirectUri) body.set("redirect_uri", redirectUri);
-    const r = await fetch("https://api.dropboxapi.com/oauth2/token", {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body,
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error_description || j.error_summary || JSON.stringify(j));
-    state.token = j.access_token;
-    state.refresh = j.refresh_token || null;
-    localStorage.setItem(LS.token, state.token);
-    if (state.refresh) localStorage.setItem(LS.refresh, state.refresh);
-    // OpenID Connect id_token (JWT). Present when scope=openid was granted. Used ONCE to
-    // mint an AgriVision session JWT at /api/auth/dropbox/login; after that we use the
-    // AgriVision session (`agri_session` in localStorage) for all backend calls.
-    if (j.id_token) {
-      localStorage.setItem("dbx_id_token", j.id_token);
-      // Identity vs storage are decoupled. If the user is ALREADY signed in (e.g. via
-      // Google), connecting Dropbox is a STORAGE action — keep their existing identity and
-      // just record where the data lives. Only when there's no session does Dropbox double
-      // as the identity provider (trade the id_token for an AgriVision session).
-      const haveSession = !!localStorage.getItem("agri_session");
-      const ready = haveSession
-        ? Promise.resolve()
-        : tradeDropboxIdTokenForSession(j.id_token, DROPBOX_APP_KEY);
-      // Fire-and-forget — if the Worker is unreachable / not configured, share calls just
-      // stay anonymous. Register the storage pointer once a session exists.
-      ready.then(() => registerDropboxPointer()).catch(() => {});
-    }
-    sessionStorage.removeItem(LS.verifier);
-  }
-
-  // Record a non-secret pointer (which Dropbox account holds this user's data) so other
-  // devices know where to send the user to restore. Reads the account from Dropbox; the
-  // access token never leaves the browser. Best-effort.
-  async function registerDropboxPointer() {
-    if (!state.token) return;
-    try {
-      const r = await dbxFetch("https://api.dropboxapi.com/2/users/get_current_account", {
-        method: "POST",
-      });
-      if (!r.ok) return;
-      const acct = await r.json();
-      await registerStoragePointer({
-        provider: "dropbox",
-        account_id: acct.account_id,
-        email: acct.email || null,
-        root_path: "/Apps/AgriVision",
-      });
-    } catch (e) {
-      console.warn("dropbox pointer register failed:", e.message);
-    }
-  }
-
-  async function refreshToken() {
-    if (!state.refresh) return false;
-    const r = await fetch("https://api.dropboxapi.com/oauth2/token", {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: state.refresh,
-        client_id: DROPBOX_APP_KEY,
-      }),
-    });
-    if (!r.ok) return false;
-    const j = await r.json();
-    state.token = j.access_token;
-    localStorage.setItem(LS.token, state.token);
-    if (j.id_token) {
-      localStorage.setItem("dbx_id_token", j.id_token);
-      // Only (re)mint a Dropbox-backed session if Dropbox is the identity (no other session
-      // present). A Google/Facebook session is refreshed separately via maybeRefreshSession.
-      if (!localStorage.getItem("agri_session")) {
-        tradeDropboxIdTokenForSession(j.id_token, DROPBOX_APP_KEY).catch(() => {});
-      }
-    }
-    return true;
-  }
-
-  async function dbxFetch(url, opts, retry = true) {
-    const res = await fetch(url, {
-      ...opts,
-      headers: { ...(opts.headers || {}), Authorization: `Bearer ${state.token}` },
-    });
-    if (res.status === 401 && retry && state.refresh) {
-      const ok = await refreshToken();
-      if (ok) return dbxFetch(url, opts, false);
-    }
-    return res;
-  }
-
-  function disconnect() {
-    state.token = null;
-    state.refresh = null;
-    localStorage.removeItem(LS.token);
-    localStorage.removeItem(LS.refresh);
-    localStorage.removeItem("dbx_id_token");
-    // Server-side logout: revokes the JWT jti in KV so a leaked copy can't be reused
-    // for the remainder of its TTL. Clears local agri_session keys too. Fire-and-forget.
-    logoutSession().catch(() => {});
-  }
-
-  async function uploadFile(path, body, mode = "overwrite") {
-    const args = JSON.stringify({ path, mode, autorename: false, mute: true });
-    const r = await dbxFetch("https://content.dropboxapi.com/2/files/upload", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/octet-stream",
-        "Dropbox-API-Arg": args,
-      },
-      body,
-    });
-    if (!r.ok) {
-      const t = await r.text();
-      throw new Error(`Upload ${path} failed: ${r.status} ${t.slice(0, 200)}`);
-    }
-    return r.json();
+  async function listSessions() {
+    return activeDriver ? activeDriver.listSessions() : [];
   }
 
   // ===== Public: save the current session =====
@@ -439,8 +203,30 @@ export function createDbx(app) {
     return out;
   }
 
+  // ===== Divergence detection (content fingerprint, à la git) =====
+  // A stable SHA-256 over the canonical manifest lets us tell whether two copies are the SAME
+  // (no false conflict on idempotent re-saves) and detect when a remote changed under us. It's
+  // the only cross-provider-comparable identity (Dropbox's content_hash ≠ Drive's md5). Volatile
+  // fields (saved_at + the hash itself) are excluded; keys are sorted recursively so order can't
+  // affect the result. `state.baseHash` = the version the in-memory state was loaded from.
+  function canonicalize(v) {
+    if (Array.isArray(v)) return v.map(canonicalize);
+    if (v && typeof v === "object") {
+      const out = {};
+      for (const k of Object.keys(v).sort()) out[k] = canonicalize(v[k]);
+      return out;
+    }
+    return v;
+  }
+  async function contentHash(manifest) {
+    const { saved_at, content_hash, ...rest } = manifest;
+    const json = JSON.stringify(canonicalize(rest));
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(json));
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
   // Build the session manifest (photo bytes referenced by file, not inlined). Shared by the
-  // Dropbox save (saveNow) and the local mirror (saveLocalManifest).
+  // cloud save (saveNow) and the local mirror (saveLocalManifest).
   function buildManifest() {
     return {
       schema: 2,
@@ -489,6 +275,13 @@ export function createDbx(app) {
   // store can't hold the photos, safeSetItem returns false and raises the storage-full warning;
   // we then fall back to caching the manifest WITHOUT photos so at least parcels/analysis survive.
   function saveLocalManifest() {
+    // A load/restore is in progress — the in-memory state is being rehydrated and may be
+    // transiently empty. Never touch the mirror now (a debounce timer armed before the restore
+    // could otherwise fire here and wipe it). saves resume when suspendSave releases.
+    if (state.suspendSave) {
+      console.log("[local] saveLocalManifest skipped (load in progress)");
+      return;
+    }
     // Nothing meaningful to cache → drop any stale mirror so a reload starts clean.
     if (app.selectedParcels.size === 0 && app.photos.length === 0 && !state.lastAnalysis) {
       localStorage.removeItem(LS.localSession);
@@ -571,12 +364,42 @@ export function createDbx(app) {
     return true;
   }
 
-  async function saveNow() {
-    if (!state.enabled || !state.token) return;
+  async function saveNow(force = false) {
+    if (!activeDriver || !activeDriver.isConnected()) return;
     if (state.suspendSave) return; // load in progress — don't save half-rehydrated state
     setSaveStatus("saving");
     ensureSession();
     const base = basePath();
+
+    // Fingerprint the manifest up front (cheap, no network) so we can (a) skip idempotent saves
+    // and (b) detect divergence BEFORE writing any photo bytes.
+    const manifest = buildManifest();
+    manifest.content_hash = await contentHash(manifest);
+
+    // Nothing changed since the last successful sync → no write needed.
+    if (state.baseHash && manifest.content_hash === state.baseHash) {
+      setSaveStatus("saved");
+      return;
+    }
+
+    // Divergence check (optimistic concurrency): if the remote moved to a version that is neither
+    // what we loaded (baseHash) nor what we're about to write, another device/provider changed it
+    // → surface a conflict instead of clobbering it. Skipped on a forced "keep mine".
+    if (!force) {
+      let remoteHash = null;
+      try {
+        const r = await downloadFile(`${base}/culture.json`);
+        const remote = await r.json();
+        remoteHash = remote.content_hash || (await contentHash(remote));
+      } catch {
+        remoteHash = null; // no remote yet (new culture / first save) → nothing to diverge from
+      }
+      if (remoteHash && remoteHash !== state.baseHash && remoteHash !== manifest.content_hash) {
+        setSaveStatus("error");
+        renderConflict();
+        return;
+      }
+    }
 
     // Upload any new app.photos.
     for (const p of app.photos) {
@@ -599,17 +422,15 @@ export function createDbx(app) {
     }
     persistUploaded();
 
-    // Build manifest (no base64 — photo bytes already uploaded).
-    const manifest = buildManifest();
     try {
       await uploadFile(`${base}/culture.json`, new TextEncoder().encode(JSON.stringify(manifest, null, 2)));
+      state.baseHash = manifest.content_hash; // in sync with the remote we just wrote
       setSaveStatus("saved");
       renderPanel(
         `✓ ${new Date().toLocaleTimeString("fr-FR")} · ${manifest.parcels.length} parc. · ${manifest.photos.length} ph.`
       );
       // Opt-in "Share with AgriVision" — fire-and-forget mirror of the manifest into KV.
-      // Runs after the Dropbox save is confirmed so KV never gets ahead of the user's
-      // own copy. Silent if disabled.
+      // Runs after the cloud save is confirmed so KV never gets ahead of the user's own copy.
       app.onShareSync?.(manifest);
     } catch (e) {
       setSaveStatus("error");
@@ -617,17 +438,45 @@ export function createDbx(app) {
     }
   }
 
+  // Save-conflict resolver: the remote culture.json changed elsewhere since we loaded it. Offer
+  // the two safe choices — overwrite with our version, or discard ours and load the remote.
+  function renderConflict() {
+    toast("Conflit de sauvegarde : la copie distante a changé ailleurs.", {
+      kind: "warn",
+      id: "save-conflict",
+      durationMs: 15000,
+    });
+    panel.innerHTML = `
+      <div style="color:var(--bad);font-size:11px;line-height:1.5">
+        ⚠ La version distante de cette culture a été modifiée ailleurs (autre appareil ou stockage).
+        « Garder ma version » écrasera la distante ; « Charger la distante » abandonnera tes
+        changements non sauvegardés.
+      </div>
+      <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+        <button class="secondary" id="conflict-mine" style="font-size:11px;padding:4px 8px">Garder ma version</button>
+        <button class="secondary" id="conflict-theirs" style="font-size:11px;padding:4px 8px">Charger la distante</button>
+      </div>`;
+    document.getElementById("conflict-mine").onclick = () => saveNow(true);
+    document.getElementById("conflict-theirs").onclick = async () => {
+      try {
+        await loadSession(state.cropCode, state.sessionId);
+      } catch (e) {
+        renderPanel(`Erreur : ${e.message}`);
+      }
+    };
+  }
+
   function schedule() {
     // Save while loading would persist half-rehydrated state; and a fully empty session has
-    // nothing to mirror. Note: NO token check here — the local mirror must run even without
-    // Dropbox (that's what makes a no-login session survive a reload).
-    if (!state.enabled || state.suspendSave) {
+    // nothing to mirror. Note: NO connection check here — the local mirror must run even without a
+    // cloud (that's what makes a no-login session survive a reload).
+    if (!anyDriverEnabled() || state.suspendSave) {
       console.log("[save] schedule() ignored (suspended/disabled):", { suspended: state.suspendSave });
       return;
     }
-    // The save badge tracks the DROPBOX sync; without a token there's no remote save to flag as
-    // pending, so don't strand the badge on "dirty" (the local mirror writes silently).
-    if (state.token && state.saveStatus !== "saving" && state.saveStatus !== "loading")
+    // The save badge tracks the CLOUD sync; with no provider connected there's no remote save to
+    // flag as pending, so don't strand the badge on "dirty" (the local mirror writes silently).
+    if (activeDriver?.isConnected() && state.saveStatus !== "saving" && state.saveStatus !== "loading")
       setSaveStatus("dirty");
     const reset = saveTimer != null;
     clearTimeout(saveTimer);
@@ -641,59 +490,17 @@ export function createDbx(app) {
       } catch (e) {
         console.warn("[local] save failed:", e?.message);
       }
-      // 2) Push to Dropbox too, when connected.
-      if (state.token) {
-        console.log("[dropbox] saveNow() start (async upload)…");
+      // 2) Push to the connected cloud too, when one is active.
+      if (activeDriver?.isConnected()) {
+        console.log("[cloud] saveNow() start (async upload)…");
         saveInFlight = saveNow()
-          .then(() => console.log("[dropbox] saveNow() done ✓"))
-          .catch((e) => console.error("[dropbox] saveNow() failed:", e))
+          .then(() => console.log("[cloud] saveNow() done ✓"))
+          .catch((e) => console.error("[cloud] saveNow() failed:", e))
           .finally(() => {
             saveInFlight = null;
           });
       }
     }, 1500);
-  }
-
-  async function listSessions() {
-    // Recursive listing of /crops; pick out folders at depth 2 (= cultures).
-    const r = await dbxFetch("https://api.dropboxapi.com/2/files/list_folder", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ path: "/crops", recursive: true }),
-    });
-    if (r.status === 409) return [];
-    if (!r.ok) throw new Error("list_folder " + r.status);
-    const j = await r.json();
-    const cultures = [];
-    for (const e of j.entries || []) {
-      if (e[".tag"] !== "folder") continue;
-      const parts = e.path_display.split("/").filter(Boolean); // ["crops","BAN","cultures","2026-..."]
-      if (parts.length === 4 && parts[0] === "crops" && parts[2] === "cultures") {
-        cultures.push({ crop: parts[1], id: parts[3], path: e.path_display });
-      }
-    }
-    return cultures.sort((a, b) => b.id.localeCompare(a.id));
-  }
-
-  async function downloadFile(path) {
-    const r = await dbxFetch("https://content.dropboxapi.com/2/files/download", {
-      method: "POST",
-      headers: { "Dropbox-API-Arg": JSON.stringify({ path }) },
-    });
-    if (!r.ok) throw new Error(`download ${path}: ${r.status}`);
-    return r;
-  }
-
-  async function deleteFolder(path) {
-    const r = await dbxFetch("https://api.dropboxapi.com/2/files/delete_v2", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ path }),
-    });
-    if (!r.ok) {
-      const t = await r.text();
-      throw new Error(`delete ${path}: ${r.status} ${t.slice(0, 150)}`);
-    }
   }
 
   async function deleteSession(cropCode, sid) {
@@ -755,6 +562,9 @@ export function createDbx(app) {
         const r = await downloadFile(`/crops/${cropCode}/cultures/${sid}/culture.json`);
         manifest = await r.json();
       }
+      // Record the version we're loading from, so the next save can detect if the remote
+      // diverged under us. Trust the stored hash; recompute for older manifests without one.
+      state.baseHash = manifest.content_hash || (await contentHash(manifest));
       // Resolve each photo's bytes. Default = Dropbox download; restore passes its own getter.
       const getPhotoData =
         opts.getPhotoData ||
@@ -986,24 +796,26 @@ export function createDbx(app) {
   // load that directly. (2) otherwise, list cultures and load the most recent one.
   async function autoReloadLatest() {
     console.log(
-      "[dbx] autoReload: enabled=",
-      state.enabled,
-      "token=",
-      !!state.token,
+      "[cloud] autoReload: enabled=",
+      anyDriverEnabled(),
+      "provider=",
+      activeDriver?.id || null,
+      "connected=",
+      !!activeDriver?.isConnected(),
       "sessionId=",
       state.sessionId,
       "cropCode=",
       state.cropCode
     );
-    if (!state.enabled) {
+    if (!anyDriverEnabled()) {
       state.suspendSave = false;
-      app.setPendingDbxLoad(false);
+      app.setPendingRestore(false);
       window.__initBasemap?.();
       window.__hideLoading?.();
       return;
     }
-    if (!state.token) {
-      // No Dropbox — restore the full session from the local mirror so a no-login session
+    if (!activeDriver || !activeDriver.isConnected()) {
+      // No cloud connected — restore the full session from the local mirror so a no-login session
       // survives reloads. loadSession (inside restoreFromLocal) sets the view, basemap and the
       // suspendSave timer itself; we only handle the "nothing cached" path.
       let restored = false;
@@ -1012,7 +824,7 @@ export function createDbx(app) {
       } catch (e) {
         console.warn("[local] restore failed:", e?.message);
       }
-      app.setPendingDbxLoad(false);
+      app.setPendingRestore(false);
       if (restored) {
         window.__hideLoading?.();
       } else {
@@ -1020,7 +832,7 @@ export function createDbx(app) {
         window.__initBasemap?.();
         window.__setLoadingMsg?.("Configurez un crop");
         setTimeout(() => window.__hideLoading?.(), 1200);
-        renderPanel("Non connecté — session conservée en local ; connectez Dropbox pour la sauvegarder.");
+        renderPanel("Non connecté — session conservée en local ; connectez un stockage cloud pour la sauvegarder.");
       }
       setTimeout(app.refreshChips, 300); // fallback chip refresh for the default view
       return;
@@ -1066,7 +878,7 @@ export function createDbx(app) {
       setTimeout(app.refreshChips, 300);
     } finally {
       // Always release the gate so subsequent user actions (move/click) behave normally.
-      app.setPendingDbxLoad(false);
+      app.setPendingRestore(false);
       window.__initBasemap?.();
       // Ensure the RPG parcel layer is on the map. Its initial render is deferred at boot when a
       // Dropbox reload is pending (see chips.js), so the restored-view path (loadSession → return)
@@ -1117,49 +929,66 @@ export function createDbx(app) {
   // ===== Panel UI =====
   const panel = document.getElementById("dbx-panel");
   function renderPanel(extra) {
-    if (!state.enabled) {
-      panel.innerHTML = `Désactivé : configure <code>DROPBOX_APP_KEY</code> en haut du script.`;
+    if (!anyDriverEnabled()) {
+      panel.innerHTML = `Désactivé : configure un fournisseur de stockage (<code>DROPBOX_APP_KEY</code> ou <code>GDRIVE_ENABLED</code>) dans <code>config.js</code>.`;
       return;
     }
-    if (!state.token) {
+    // Keep activeDriver in sync with reality (a driver may have just connected/disconnected).
+    if (!activeDriver || !activeDriver.isConnected()) pickActiveDriver();
+
+    if (!activeDriver || !activeDriver.isConnected()) {
+      // Disconnected: offer every enabled provider. Dropbox keeps its manual code-paste fallback.
+      const dbxRow = dropbox.isEnabled()
+        ? `<button class="secondary" id="dbx-connect" style="font-size:11px;padding:4px 8px">☁ Connecter Dropbox</button>
+           <div id="dbx-code-row" style="display:none;margin-top:6px">
+             <input id="dbx-code" type="text" placeholder="Coller le code…" autocomplete="off" data-lpignore="true" data-form-type="other" style="font-size:11px;padding:4px 6px" />
+             <button class="secondary" id="dbx-submit" style="font-size:11px;padding:4px 8px;margin-top:4px">Valider</button>
+           </div>`
+        : "";
+      const gdrRow = gdrive.isEnabled()
+        ? `<button class="secondary" id="gdrive-connect" style="font-size:11px;padding:4px 8px">📁 Connecter Google Drive</button>`
+        : "";
       panel.innerHTML = `
-        <button class="secondary" id="dbx-connect" style="font-size:11px;padding:4px 8px">☁ Connecter Dropbox</button>
-        <div id="dbx-code-row" style="display:none;margin-top:6px">
-          <input id="dbx-code" type="text" placeholder="Coller le code…" autocomplete="off" data-lpignore="true" data-form-type="other" style="font-size:11px;padding:4px 6px" />
-          <button class="secondary" id="dbx-submit" style="font-size:11px;padding:4px 8px;margin-top:4px">Valider</button>
-        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start">${dbxRow}${gdrRow}</div>
         <div id="dbx-msg" class="small" style="margin-top:6px"></div>
       `;
-      document.getElementById("dbx-connect").onclick = async () => {
-        const msg = document.getElementById("dbx-msg");
+      const msgEl = () => document.getElementById("dbx-msg");
+      document.getElementById("dbx-connect")?.addEventListener("click", async () => {
         try {
-          msg.textContent = "Ouverture de Dropbox…";
-          const res = await startAuth();
+          msgEl().textContent = "Ouverture de Dropbox…";
+          const res = await dropbox.startAuth();
           if (res?.manual) {
-            // file:// / localhost: no registered redirect → reveal the paste box.
+            // file:// / localhost without a registered redirect → reveal the paste box.
             document.getElementById("dbx-code-row").style.display = "block";
-            msg.textContent = "Autoriser dans l'onglet Dropbox puis coller le code ici.";
-          } else if (res?.done) {
-            renderPanel(); // connected via popup — exchange already happened
-          } else {
-            // popup closed/cancelled or redirecting; nothing pasted, nothing connected
-            msg.textContent = res?.redirected ? "Redirection vers Dropbox…" : "";
+            msgEl().textContent = "Autoriser dans l'onglet Dropbox puis coller le code ici.";
+          } else if (!res?.done) {
+            msgEl().textContent = res?.redirected ? "Redirection vers Dropbox…" : "";
           }
+          // res.done → onConnected already re-rendered the panel.
         } catch (e) {
-          msg.textContent = "Erreur : " + e.message;
+          msgEl().textContent = "Erreur : " + e.message;
         }
-      };
-      document.getElementById("dbx-submit").onclick = async () => {
+      });
+      document.getElementById("dbx-submit")?.addEventListener("click", async () => {
         const code = document.getElementById("dbx-code").value.trim();
         if (!code) return;
         try {
-          await exchangeCode(code);
-          renderPanel();
-          schedule(); // initial save
+          await dropbox.exchangeCode(code);
+          onProviderConnected("dropbox");
         } catch (e) {
-          document.getElementById("dbx-msg").textContent = "Erreur : " + e.message;
+          msgEl().textContent = "Erreur : " + e.message;
         }
-      };
+      });
+      document.getElementById("gdrive-connect")?.addEventListener("click", async () => {
+        try {
+          msgEl().textContent = "Connexion à Google Drive…";
+          const res = await gdrive.startAuth();
+          if (!res?.done) msgEl().textContent = "Connexion Google Drive annulée.";
+          // res.done → onConnected already re-rendered.
+        } catch (e) {
+          msgEl().textContent = "Erreur : " + e.message;
+        }
+      });
       return;
     }
     const cm = state.cropCode ? app.cropMeta(state.cropCode) : null;
@@ -1168,7 +997,7 @@ export function createDbx(app) {
       : "(aucun crop actif)";
     panel.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
-        <div style="flex:1">✓ Connecté · ${cropLabel}</div>
+        <div style="flex:1">✓ ${activeDriver.label} · ${cropLabel}</div>
         <div id="dbx-status-badge" style="font-size:11px;font-weight:700;white-space:nowrap"></div>
       </div>
       <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
@@ -1188,7 +1017,9 @@ export function createDbx(app) {
     };
     document.getElementById("dbx-save").onclick = () => saveNow();
     document.getElementById("dbx-disc").onclick = () => {
-      disconnect();
+      activeDriver.disconnect();
+      localStorage.removeItem(LS.activeProvider);
+      pickActiveDriver(); // fall through to another connected provider, if any
       renderPanel();
     };
     document.getElementById("dbx-load").onclick = () => renderCropsList();
@@ -1261,7 +1092,7 @@ export function createDbx(app) {
               renderCropsList();
               renderPanel();
             } catch (e) {
-              alert("Erreur : " + e.message);
+              toast("Erreur : " + e.message, { kind: "warn" });
             }
           })
       );
@@ -1270,17 +1101,17 @@ export function createDbx(app) {
     }
   }
   renderPanel();
-  // If we came back from a popup-blocked full-page Dropbox redirect (?code in the URL), finish
-  // the exchange now. No-op in the normal case and inside the popup (handled separately).
-  handleDropboxRedirectReturn();
-  // `connect` exposes the Dropbox OAuth flow so other UI (the login panel / tutorial) can
-  // start it without owning the dbx-panel button.
+  // (The Dropbox driver completes any popup-blocked full-page redirect itself, on its own init.)
+  // `connect` / `connectDrive` expose the storage OAuth flows so other UI (the login panel /
+  // tutorial / storage hint) can start them without owning the dbx-panel button.
   return {
     schedule,
     setAnalysis,
     autoReloadLatest,
     listSessions,
-    connect: startAuth,
+    connect: () => dropbox.startAuth(),
+    connectDrive: () => gdrive.startAuth(),
+    isStorageConnected: () => anyDriverConnected(),
     restoreFromAgriVision,
   };
 }

@@ -5,7 +5,7 @@
 import { BAN } from "./config.js";
 
 /**
- * @param {object} app - { map, setCurrentAddress, getPendingDbxLoad }
+ * @param {object} app - { map, setCurrentAddress, getPendingRestore }
  */
 export function installGeocoding(app) {
   const statusEl = document.getElementById("status");
@@ -53,10 +53,11 @@ export function installGeocoding(app) {
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const { latitude: lat, longitude: lon } = pos.coords;
-        // If a saved crop is about to load, don't pan — its fitBounds will dictate the view.
-        // The Dropbox restore path is the one that calls __initBasemap() afterwards.
-        // Otherwise: pan to the GPS view, THEN install the basemap so tiles fetch once.
-        if (!app.getPendingDbxLoad()) {
+        // Don't pan to GPS if a restore is pending OR has already set the view + basemap — its
+        // fitBounds dictates the view, and geoloc can resolve AFTER the restore (which would
+        // otherwise yank the map to GPS). Only auto-pan + install the basemap when nothing else
+        // owns the view: no pending restore AND the basemap isn't installed yet.
+        if (!app.getPendingRestore() && !app.isBasemapInstalled?.()) {
           app.map.setView([lat, lon], 15);
           window.__initBasemap?.();
         }
@@ -88,10 +89,10 @@ export function installGeocoding(app) {
       },
       () => {
         statusEl.textContent = "Géoloc refusée/indisponible — vue par défaut : La Réunion.";
-        // No GPS + no Dropbox restore inbound → settle on DEFAULT_VIEW and install basemap
-        // now (don't wait the 8 s safety net). If Dropbox restore IS pending, skip — its
-        // fitBounds will choose the right view.
-        if (!app.getPendingDbxLoad()) window.__initBasemap?.();
+        // No GPS + no restore inbound → settle on DEFAULT_VIEW and install the basemap now (don't
+        // wait the 8 s safety net). If a restore IS pending (any storage), skip — its fitBounds
+        // will choose the right view.
+        if (!app.getPendingRestore() && !app.isBasemapInstalled?.()) window.__initBasemap?.();
       },
       { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 }
     );

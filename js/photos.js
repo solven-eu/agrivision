@@ -1,7 +1,7 @@
 // AgriVision RE — photo handling: upload, EXIF, compression, map markers + FOV cones, card rendering.
 // Returns bound functions so call sites in main.js stay short.
 
-import { compressImage, cardinal, destPoint, formatRelativeDays } from "./util.js";
+import { compressImage, shrinkDataUrl, cardinal, destPoint, formatRelativeDays } from "./util.js";
 import { openImageModal } from "./metrics.js";
 
 /**
@@ -30,7 +30,7 @@ export function createPhotos(app) {
       <div style="font-size:11px;margin-top:6px">${p.name}${dirTxt}</div>
       <div style="display:flex;gap:4px;margin-top:6px">
         <button class="popup-aim" data-id="${p.id}" style="font-size:11px;padding:3px 8px;background:#4ade80;color:#0a0e13;border:none;border-radius:4px;font-weight:600;cursor:pointer">🧭 ${p.direction != null ? "Modifier" : "Définir"} direction</button>
-        <button class="popup-move" data-id="${p.id}" style="font-size:11px;padding:3px 8px;background:#232b34;color:#e6edf3;border:1px solid #2f3a45;border-radius:4px;cursor:pointer">📍 Replacer</button>
+        <button class="popup-move" data-id="${p.id}" style="font-size:11px;padding:3px 8px;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer">📍 Replacer</button>
       </div>`;
     p.marker = L.marker([p.lat, p.lon], { icon }).addTo(app.map).bindPopup(popupHtml);
     p.marker.on("popupopen", (e) => {
@@ -80,6 +80,123 @@ export function createPhotos(app) {
       }).addTo(layers);
       p.fovLayer = layers.addTo(app.map);
     }
+  }
+
+  // Bytes from a base64 string (base64 is ~4/3 of the raw byte size).
+  function b64Bytes(b64) {
+    return Math.round((b64?.length || 0) * 0.75);
+  }
+  function fmtBytes(n) {
+    if (n < 1024) return `${n} o`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} Ko`;
+    return `${(n / (1024 * 1024)).toFixed(2)} Mo`;
+  }
+
+  // Per-photo "Réduire la qualité" — a dedicated modal showing BEFORE vs AFTER (preview + size +
+  // dimensions) at the chosen quality, so the user sees exactly what they'll save before applying.
+  function openCompressModal(p) {
+    const srcUrl = p.dataUrl || (p.b64 ? `data:${p.mime || "image/jpeg"};base64,${p.b64}` : null);
+    if (!srcUrl) return;
+    const beforeBytes = b64Bytes(p.b64);
+
+    const overlay = document.createElement("div");
+    overlay.style.cssText =
+      "position:fixed;inset:0;z-index:10070;display:flex;align-items:center;justify-content:center;" +
+      "background:rgba(0,0,0,.55);padding:16px;overflow-y:auto";
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+    const card = document.createElement("div");
+    card.style.cssText =
+      "background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:12px;" +
+      "width:min(460px,96vw);max-height:92vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,.5);padding:16px";
+    card.addEventListener("click", (e) => e.stopPropagation());
+    overlay.appendChild(card);
+
+    let result = null; // latest { dataUrl, b64, mime, width, height }
+    const close = () => {
+      overlay.remove();
+      document.removeEventListener("keydown", onEsc);
+    };
+    const onEsc = (e) => e.key === "Escape" && close();
+    document.addEventListener("keydown", onEsc);
+
+    card.innerHTML = `
+      <div style="font-weight:700;font-size:15px;margin-bottom:10px">🗜 Réduire la qualité</div>
+      <div style="display:flex;gap:10px">
+        <div style="flex:1;text-align:center">
+          <div class="small" style="color:var(--muted);margin-bottom:4px">Avant</div>
+          <img src="${srcUrl}" style="width:100%;max-height:160px;object-fit:contain;border:1px solid var(--border);border-radius:6px" />
+          <div class="small" style="margin-top:4px">${fmtBytes(beforeBytes)} · ${p.width || "?"}×${p.height || "?"}</div>
+        </div>
+        <div style="flex:1;text-align:center">
+          <div class="small" style="color:var(--muted);margin-bottom:4px">Après</div>
+          <img id="cmp-after-img" style="width:100%;max-height:160px;object-fit:contain;border:1px solid var(--border);border-radius:6px;background:var(--panel2)" />
+          <div class="small" id="cmp-after-info" style="margin-top:4px;color:var(--muted)">Calcul…</div>
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <label class="small" style="color:var(--muted)">Qualité : <span id="cmp-q-val">60</span>%</label>
+        <input id="cmp-q" type="range" min="30" max="90" step="5" value="60" style="width:100%" />
+        <label class="small" style="color:var(--muted)">Dimension max : <span id="cmp-d-val">1280</span> px</label>
+        <input id="cmp-d" type="range" min="640" max="2048" step="128" value="1280" style="width:100%" />
+      </div>
+      <div id="cmp-gain" class="small" style="margin-top:6px;color:var(--accent)"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+        <button id="cmp-cancel" class="secondary" style="font-size:12px;padding:6px 12px">Annuler</button>
+        <button id="cmp-apply" style="font-size:12px;padding:6px 12px">Appliquer</button>
+      </div>`;
+
+    const afterImg = card.querySelector("#cmp-after-img");
+    const afterInfo = card.querySelector("#cmp-after-info");
+    const gainEl = card.querySelector("#cmp-gain");
+    const qEl = card.querySelector("#cmp-q");
+    const dEl = card.querySelector("#cmp-d");
+
+    let recomputeTimer = null;
+    async function recompute() {
+      const quality = parseInt(qEl.value, 10) / 100;
+      const maxDim = parseInt(dEl.value, 10);
+      card.querySelector("#cmp-q-val").textContent = qEl.value;
+      card.querySelector("#cmp-d-val").textContent = dEl.value;
+      afterInfo.textContent = "Calcul…";
+      try {
+        const r = await shrinkDataUrl(srcUrl, { maxDim, quality });
+        result = { ...r, mime: "image/jpeg" };
+        afterImg.src = r.dataUrl;
+        const afterBytes = b64Bytes(r.b64);
+        afterInfo.textContent = `${fmtBytes(afterBytes)} · ${r.width}×${r.height}`;
+        const pct = beforeBytes ? Math.round((1 - afterBytes / beforeBytes) * 100) : 0;
+        gainEl.textContent =
+          afterBytes < beforeBytes ? `≈ ${pct}% plus léger (${fmtBytes(beforeBytes - afterBytes)} libérés)` : "Pas plus léger à ce réglage.";
+      } catch (e) {
+        afterInfo.textContent = "Erreur : " + e.message;
+        result = null;
+      }
+    }
+    const schedule = () => {
+      clearTimeout(recomputeTimer);
+      recomputeTimer = setTimeout(recompute, 120);
+    };
+    qEl.addEventListener("input", schedule);
+    dEl.addEventListener("input", schedule);
+    card.querySelector("#cmp-cancel").onclick = close;
+    card.querySelector("#cmp-apply").onclick = () => {
+      if (result && result.b64) {
+        p.dataUrl = result.dataUrl;
+        p.b64 = result.b64;
+        p.mime = result.mime;
+        p.width = result.width;
+        p.height = result.height;
+        p.recompressed = true;
+        renderPhotos();
+        app.onSchedule();
+      }
+      close();
+    };
+
+    document.body.appendChild(overlay);
+    recompute();
   }
 
   function renderPhotos() {
@@ -154,8 +271,12 @@ export function createPhotos(app) {
       }
       wrap.innerHTML = `
         <div class="photo-slot" data-photo-id="${p.id}" style="position:relative;cursor:${p.lat != null ? "crosshair" : "default"}" title="${p.lat != null ? "Cliquer autour de la photo pour recentrer la carte" : ""}">
-          <img class="photo-img" src="${p.dataUrl}" alt="${p.name}" data-photo-id="${p.id}" style="cursor:zoom-in" title="Cliquer pour agrandir" />
-          <div style="position:absolute;top:-4px;left:-4px;background:var(--accent);color:#0a0e13;border-radius:50%;width:16px;height:16px;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;pointer-events:none">${i + 1}</div>
+          ${
+            p.dataUrl
+              ? `<img class="photo-img" src="${p.dataUrl}" alt="${p.name}" data-photo-id="${p.id}" style="cursor:zoom-in" title="Cliquer pour agrandir" />`
+              : `<div class="photo-img" data-photo-id="${p.id}" style="display:flex;align-items:center;justify-content:center;background:var(--panel2);color:var(--muted);font-size:11px">${p.loading ? "⏳" : "—"}</div>`
+          }
+          <div style="position:absolute;top:-4px;left:-4px;background:var(--accent);color:var(--on-accent);border-radius:50%;width:16px;height:16px;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;pointer-events:none">${i + 1}</div>
         </div>
         <div class="meta">
           <div title="${p.name}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</div>
@@ -165,6 +286,7 @@ export function createPhotos(app) {
             <button class="secondary place" data-id="${p.id}">${p.lat != null ? "Replacer" : "📍 Placer"}</button>
             <button class="secondary aim" data-id="${p.id}" ${p.lat == null ? "disabled title='Place la photo d&apos;abord'" : ""}>🧭 Direction</button>
             <button class="secondary analyze-photo" data-id="${p.id}" ${p.analyzing ? "disabled" : ""} title="${p.analyzing ? "Analyse en cours…" : "Relancer l'analyse de cette photo"}">${p.analyzing ? "🔬 …" : p.tags?.analyzed_at ? "🔬 ↻" : "🔬 Analyser"}</button>
+            <button class="secondary compress" data-id="${p.id}" title="Réduire la qualité / le poids de cette photo">🗜 Réduire</button>
           </div>
         </div>
         <button class="del" data-id="${p.id}">×</button>
@@ -252,6 +374,7 @@ export function createPhotos(app) {
           app.setAimingPhotoId(null);
           app.mapEl.classList.add("map-placing");
           app.aStatus.textContent = "Cliquez sur la carte pour placer cette photo (Echap pour annuler).";
+          window.__mapWaitBanner?.("📍 Clique sur la carte pour <b>placer</b> la photo");
         })
     );
     app.thumbsEl.querySelectorAll(".aim").forEach(
@@ -261,6 +384,7 @@ export function createPhotos(app) {
           app.setPlacingPhotoId(null);
           app.mapEl.classList.add("map-placing");
           app.aStatus.textContent = "Cliquez sur la carte vers où la photo a été prise (Echap pour annuler).";
+          window.__mapWaitBanner?.("🧭 Clique sur la carte <b>vers où</b> la photo a été prise");
         })
     );
     app.thumbsEl.querySelectorAll(".analyze-photo").forEach((b) => {
@@ -275,6 +399,12 @@ export function createPhotos(app) {
           p.analyzing = false;
           renderPhotos();
         });
+      };
+    });
+    app.thumbsEl.querySelectorAll(".compress").forEach((b) => {
+      b.onclick = (e) => {
+        const p = app.photos.find((x) => x.id === e.currentTarget.dataset.id);
+        if (p) openCompressModal(p);
       };
     });
     app.thumbsEl.querySelectorAll(".del").forEach(
@@ -301,7 +431,7 @@ export function createPhotos(app) {
         e.stopPropagation();
         const id = img.dataset.photoId;
         const p = app.photos.find((x) => x.id === id);
-        if (!p) return;
+        if (!p || !p.dataUrl) return; // not-yet-loaded placeholder → nothing to zoom
         const meta = [];
         if (p.lat != null) meta.push(`📍 ${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}`);
         if (p.direction != null) meta.push(`🧭 ${Math.round(p.direction)}° ${cardinal(p.direction)}`);

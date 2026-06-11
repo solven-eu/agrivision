@@ -164,6 +164,38 @@ export function installParcels(app) {
 
   async function toggleParcelAt(latlng) {
     const { lat, lng: lon } = latlng;
+    const pt = [lon, lat];
+
+    // When parcels are LOCKED, a map click must not add/remove anything — so don't hit the WFS
+    // at all (it's a wasted network round-trip). ALWAYS blink the lock badge so the user gets
+    // feedback that the lock is on (their earlier complaint: "should blink"). Then resolve the
+    // click locally against the selected parcels' stored geometry: inside one → focus it.
+    if (app.getParcelsLocked?.()) {
+      let hitId = null;
+      for (const [id, p] of app.selectedParcels) {
+        if (p.geometry && pointInGeom(pt, p.geometry)) {
+          hitId = id;
+          break;
+        }
+      }
+      if (hitId) {
+        toggleActive(hitId);
+        renderParcelHighlight();
+        renderParcelInfoPanel();
+        const sec = document.getElementById("parcels-section");
+        if (sec && !sec.open) sec.open = true;
+        if (activeParcelIds.has(hitId)) {
+          const row = parcelInfoEl.querySelector(`.parcel-row[data-parcel-id="${hitId}"]`);
+          row?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        openParcelDetail(hitId); // inspect mode: show the parcel's detail sheet
+      }
+      // Blink LAST — after the renders above, which call updateLockHint() and rewrite the badge's
+      // className (that was silently wiping the "flash" class before, so it never animated).
+      app.flashLockHint?.();
+      return;
+    }
+
     const d = 0.0005;
     const bbox = `${lon - d},${lat - d},${lon + d},${lat + d},EPSG:4326`;
     const params = new URLSearchParams({
@@ -180,37 +212,20 @@ export function installParcels(app) {
       const r = await fetch(`${IGN_WFS}?${params}`);
       const j = await r.json();
       if (!j.features?.length) {
-        parcelInfoEl.innerHTML = `<dt>Aucune parcelle RPG ici</dt><dd class="small">Cliquer sur une zone agricole.</dd>`;
-        parcelInfoEl.style.display = "block";
+        // Clicked outside any RPG parcel. Don't clobber the selected-parcels list (that made the
+        // panel say "Aucune parcelle RPG ici" while the count showed 1) — only show that message
+        // when nothing is selected; otherwise just re-render the existing selection.
+        if (app.selectedParcels.size > 0) {
+          renderParcelInfoPanel();
+        } else {
+          parcelInfoEl.innerHTML = `<dt>Aucune parcelle RPG ici</dt><dd class="small">Cliquer sur une zone agricole.</dd>`;
+          parcelInfoEl.style.display = "block";
+        }
         return;
       }
-      const pt = [lon, lat];
       const hit = j.features.find((f) => pointInGeom(pt, f.geometry)) || j.features[0];
       const id = featureKey(hit);
-      const locked = app.getParcelsLocked?.();
-      // Lock semantics: when locked, map clicks no longer add/remove from the selection.
-      // They DO toggle the "active/focused" parcel — same behaviour as clicking a row in
-      // the sidebar. Lets the user explore which parcel is which without disturbing the
-      // selection.
-      if (locked) {
-        if (app.selectedParcels.has(id)) {
-          toggleActive(id);
-          renderParcelHighlight();
-          renderParcelInfoPanel();
-          // Locked-click is intended to "see this parcel in the tools" — make sure the
-          // section is open and the just-clicked row is scrolled into view.
-          const sec = document.getElementById("parcels-section");
-          if (sec && !sec.open) sec.open = true;
-          if (activeParcelIds.has(id)) {
-            const row = parcelInfoEl.querySelector(`.parcel-row[data-parcel-id="${id}"]`);
-            row?.scrollIntoView({ behavior: "smooth", block: "center" });
-          }
-          openParcelDetail(id); // inspect mode: show the parcel's detail sheet
-          return;
-        }
-        app.flashLockHint?.();
-        return;
-      }
+      // (Locked clicks are handled up-front without a WFS call — see the top of this function.)
       if (app.selectedParcels.has(id)) app.selectedParcels.delete(id);
       else {
         const cap = maxParcelsForCurrentPlan();
@@ -623,16 +638,14 @@ export function installParcels(app) {
   function updateLockHint() {
     if (!_lockHint) {
       const LockHint = L.Control.extend({
-        options: { position: "topleft" },
+        // topright (with Recadrer/Ortho), NOT topleft — topleft is the zoom +/− cluster, which
+        // overlapped the badge and intercepted clicks on the unlock button.
+        options: { position: "topright" },
         onAdd() {
           const el = L.DomUtil.create("div", "lock-hint");
+          // Stop map drag/zoom when interacting with the badge, but let the inner button click.
           L.DomEvent.disableClickPropagation(el);
-          el.addEventListener("click", () => {
-            app.setParcelsLocked(!app.getParcelsLocked());
-            renderParcelInfoPanel();
-            renderParcelHighlight(); // filled ↔ glow styling on lock change
-            updateLockHint();
-          });
+          L.DomEvent.disableScrollPropagation(el);
           return el;
         },
       });
@@ -643,12 +656,36 @@ export function installParcels(app) {
       el.style.display = "none";
       return;
     }
-    el.style.display = "block";
+    el.style.display = "flex";
     const parcelsLocked = app.getParcelsLocked();
+    // Explicit toggle BUTTON (the whole-badge click was undiscoverable). The text is informational;
+    // the button is the action.
     el.innerHTML = parcelsLocked
-      ? `🔒 Parcelles verrouillées — clic sur la carte ignoré`
-      : `🔓 Parcelles déverrouillées — clic = toggle parcelle`;
-    el.className = "lock-hint " + (parcelsLocked ? "locked" : "unlocked");
+      ? `<span>🔒 Verrouillées</span><button class="lock-toggle-btn" type="button">🔓 Déverrouiller</button>`
+      : `<span>🔓 Déverrouillées</span><button class="lock-toggle-btn" type="button">🔒 Verrouiller</button>`;
+    // Use classList (NOT el.className=) so we don't clobber Leaflet's `.leaflet-control` class —
+    // that class is what gives the control pointer-events:auto. Overwriting className removed it,
+    // leaving the badge + its button non-clickable (the corner container is pointer-events:none).
+    el.classList.add("lock-hint");
+    el.classList.toggle("locked", parcelsLocked);
+    el.classList.toggle("unlocked", !parcelsLocked);
+    const tbtn = el.querySelector(".lock-toggle-btn");
+    if (tbtn) {
+      // disableClickPropagation isolates the button from Leaflet's map click (no blink/WFS leak).
+      // The handler is a plain .onclick (reliably fires, no listener accumulation across re-renders).
+      L.DomEvent.disableClickPropagation(tbtn);
+      L.DomEvent.disableScrollPropagation(tbtn);
+      tbtn.onclick = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const next = !app.getParcelsLocked();
+        console.log("[lock] toggle button clicked → locked =", next);
+        app.setParcelsLocked(next);
+        renderParcelInfoPanel();
+        renderParcelHighlight(); // filled ↔ glow styling on lock change
+        updateLockHint();
+      };
+    }
   }
 
   app.map.on("zoomend", updateSelectHint);
@@ -664,11 +701,17 @@ export function installParcels(app) {
 
   // Briefly highlight the lock badge — used by the map-click router when the user clicks
   // while parcels are locked, to make the "ignored click" visible.
+  let _flashTimer = null;
   function flashLockHint() {
     if (!_lockHint) return;
     const el = _lockHint.getContainer();
+    // Remove + force reflow so the blink animation restarts even on rapid repeat clicks; clear the
+    // prior removal timer so a stale timeout can't cut a fresh animation short.
+    clearTimeout(_flashTimer);
+    el.classList.remove("flash");
+    void el.offsetWidth;
     el.classList.add("flash");
-    setTimeout(() => el.classList.remove("flash"), 600);
+    _flashTimer = setTimeout(() => el.classList.remove("flash"), 950);
   }
 
   // Show a "zoom in further" message in the side panel.

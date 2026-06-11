@@ -37,6 +37,7 @@ export function installMapClickRouter(app) {
       }
       app.setPlacingPhotoId(null);
       app.mapEl.classList.remove("map-placing");
+      window.__hideMapWaitBanner?.();
       return;
     }
 
@@ -52,6 +53,7 @@ export function installMapClickRouter(app) {
       }
       app.setAimingPhotoId(null);
       app.mapEl.classList.remove("map-placing");
+      window.__hideMapWaitBanner?.();
       return;
     }
 

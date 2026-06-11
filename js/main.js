@@ -101,7 +101,7 @@ function renderMetrics(m) {
       } else {
         const n = parseFloat(trimmed);
         if (isNaN(n) || n < 0) {
-          alert("Prix invalide.");
+          toast("Prix invalide.", { kind: "warn" });
           return;
         }
         analysisCombined.market.user_price_eur_per_kg = n;
@@ -128,7 +128,7 @@ function renderMetrics(m) {
       } else {
         const pct = parseFloat(trimmed);
         if (isNaN(pct) || pct < 0 || pct > 100) {
-          alert("Valeur invalide (0–100 attendu).");
+          toast("Valeur invalide (0–100 attendu).", { kind: "warn" });
           return;
         }
         analysisCombined.health.user_lost_output_ratio_0_1 = pct / 100;
@@ -181,10 +181,23 @@ const sunCompass = installSunCompass(map);
 // Geolocation: center on user if available, else keep default.
 
 let currentAddress = null; // { label, lat, lon, city, postcode, context }
-// If a Dropbox token is present at startup, an auto-reload is imminent and will
-// dictate the final map view. Skip eager view-driven work (chip prefetch, geoloc auto-pan)
-// until autoReload concludes.
-let pendingDbxLoad = !!localStorage.getItem("dbx_token");
+// Storage-agnostic "a restore is pending" gate. TRUE at startup whenever ANY storage backend has a
+// session to restore — the auto-reload will then dictate the final map view (fitBounds to the
+// parcels). While pending we skip eager view-driven work (geoloc auto-pan + basemap install) so we
+// don't load tiles around the GPS position and then visibly jump to the parcels; the restore sets
+// the final view and installs the basemap once. The 8 s safety net covers a restore that never fires.
+//
+// SINGLE SOURCE OF TRUTH for "is there a stored session?": add any future storage backend (e.g. a
+// KV-only restore) here and the whole map-deferral chain stays correct — it's transverse to the
+// storage solution, not Dropbox-specific.
+function hasStoredSession() {
+  return (
+    !!localStorage.getItem("dbx_token") ||
+    !!localStorage.getItem("gdrive_connected") ||
+    !!localStorage.getItem("agri_local_session")
+  );
+}
+let pendingRestore = hasStoredSession();
 
 // Address geocoding + browser geolocation — extracted to js/geocode.js
 import { installGeocoding } from "./geocode.js";
@@ -193,14 +206,17 @@ installGeocoding({
   setCurrentAddress: (a) => {
     currentAddress = a;
   },
-  getPendingDbxLoad: () => pendingDbxLoad,
+  getPendingRestore: () => pendingRestore,
+  // So geolocation can skip its auto-pan once a restore has already set the view + basemap
+  // (geoloc can resolve AFTER the restore, which would otherwise yank the map to GPS).
+  isBasemapInstalled: () => _basemapInstalled,
 });
 
 // RPG/cadastre WMS layers + layer control — extracted to js/chips.js
 import { installChips } from "./chips.js";
 const { refreshChips, refreshRpgLayer } = installChips({
   map,
-  getPendingDbxLoad: () => pendingDbxLoad,
+  getPendingRestore: () => pendingRestore,
 });
 
 // ============ Parcels (extracted to js/parcels.js) ============
@@ -301,13 +317,35 @@ function readFileAsB64(file) {
   });
 }
 
-window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && (placingPhotoId || aimingPhotoId)) {
-    placingPhotoId = null;
-    aimingPhotoId = null;
-    mapEl.classList.remove("map-placing");
-    aStatus.textContent = "Annulé.";
+// Prominent "the app is waiting for a map click" banner over the map, shown during photo
+// place / aim modes (the subtle sidebar status line was too easy to miss). Created lazily.
+let _mapWaitBanner = null;
+function showMapWaitBanner(message) {
+  if (!_mapWaitBanner) {
+    _mapWaitBanner = document.createElement("div");
+    _mapWaitBanner.id = "map-wait-banner";
+    document.getElementById("map").appendChild(_mapWaitBanner);
   }
+  _mapWaitBanner.innerHTML = `<span>${message}</span><button type="button" id="map-wait-cancel">✕ Annuler</button>`;
+  _mapWaitBanner.style.display = "flex";
+  document.getElementById("map-wait-cancel").onclick = cancelPlacingMode;
+}
+function hideMapWaitBanner() {
+  if (_mapWaitBanner) _mapWaitBanner.style.display = "none";
+}
+function cancelPlacingMode() {
+  placingPhotoId = null;
+  aimingPhotoId = null;
+  mapEl.classList.remove("map-placing");
+  hideMapWaitBanner();
+  aStatus.textContent = "Annulé.";
+}
+// Exposed so photos.js (enter mode) and router.js (click completes the mode) can drive the banner.
+window.__mapWaitBanner = showMapWaitBanner;
+window.__hideMapWaitBanner = hideMapWaitBanner;
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && (placingPhotoId || aimingPhotoId)) cancelPlacingMode();
 });
 
 async function handlePhotoFiles(files) {
@@ -842,6 +880,36 @@ document.getElementById("show-tutorial-btn")?.addEventListener("click", () => {
   showTutorial();
 });
 
+// Force-refresh: clear the service-worker asset caches + unregister the SW, then hard-reload so
+// the very latest HTML/JS/CSS is fetched from the network. Deliberately does NOT touch
+// localStorage — the user's session mirror, tokens and prefs must survive. Useful when a stale
+// service-worker copy is serving old code.
+document.getElementById("force-refresh-btn")?.addEventListener("click", async () => {
+  const btn = document.getElementById("force-refresh-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "🔄 Mise à jour…";
+  }
+  try {
+    if (window.caches) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+      console.log("[refresh] cleared", keys.length, "cache(s)");
+    }
+    if (navigator.serviceWorker) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.unregister()));
+      console.log("[refresh] unregistered", regs.length, "service worker(s)");
+    }
+  } catch (e) {
+    console.warn("[refresh] cleanup failed:", e?.message);
+  }
+  // Cache-bust the navigation itself so even the HTML isn't served from HTTP cache.
+  const url = new URL(location.href);
+  url.searchParams.set("_r", String(Date.now()));
+  location.replace(url.toString());
+});
+
 // Hamburger menu (top-right of sidebar header) — toggles the preferences panel.
 // Click anywhere outside closes it.
 const _appMenuBtn = document.getElementById("app-menu-btn");
@@ -921,11 +989,14 @@ window.addEventListener("agrivision:logout", () => share.render());
 // renders the toast, whose action re-dispatches one of the two events handled here. See CLAUDE.md
 // "Gating: make plan/login limits loud and actionable".
 installGateToasts();
-window.addEventListener("agrivision:open-plans", () => {
-  // Refresh the quota so __lastPlanTier is current, then open the centered plans modal
-  // (the old corner dropdown was easy to miss — especially on mobile). The modal hosts the
-  // plan list and the embedded Stripe Checkout, so the whole upgrade flow stays in-page.
-  share.fetchQuota?.();
+window.addEventListener("agrivision:open-plans", async () => {
+  // Refresh the quota FIRST so __lastPlanTier reflects the real (possibly org-inherited) tier,
+  // then open the centered plans modal. Awaiting avoids opening with a stale "free" tier — which
+  // would wrongly offer to BUY a plan the user already has via Early Birds. Best-effort: if the
+  // fetch fails we still open with the last known tier.
+  try {
+    await share.fetchQuota?.();
+  } catch {}
   openPlansModal(window.__lastPlanTier || "free");
 });
 window.addEventListener("agrivision:open-login", () => showTutorial({ startAtLogin: true }));
@@ -1034,12 +1105,13 @@ const DBX = createDbx({
   setLastAnalyzedFingerprint: (v) => {
     lastAnalyzedFingerprint = v;
   },
-  setPendingDbxLoad: (v) => {
-    pendingDbxLoad = v;
+  setPendingRestore: (v) => {
+    pendingRestore = v;
   },
 });
 // The login panel / tutorial offer "Continuer avec Dropbox"; route that to the OAuth flow.
 window.addEventListener("agrivision:connect-dropbox", () => DBX.connect());
+window.addEventListener("agrivision:connect-gdrive", () => DBX.connectDrive());
 window.DBX = DBX; // expose so the login panel's "Restaurer depuis AgriVision" can reach it
 
 // ===== Wire save triggers on every data change =====
@@ -1175,6 +1247,10 @@ installMapClickRouter({
   flashLockHint: parcels.flashLockHint,
   showZoomTooLowMessage: parcels.showZoomTooLowMessage,
 });
+
+// Render the metrics grid's empty state at boot so "Grille normalisée" shows a clear "no analysis
+// yet — lance l'analyse" prompt instead of looking blank/broken.
+renderMetrics(analysisCombined);
 
 // Proactive local-storage quota check at boot — warns once if the store is already near full
 // from a previous session (caches accumulate across reloads). Deferred so the toast host and

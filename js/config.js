@@ -70,6 +70,23 @@ export const GOOGLE_CLIENT_ID =
 // boot the map/tiles just to read the token. Register THIS exact URL as an Authorized redirect URI.
 export const GOOGLE_REDIRECT_URI = "https://www.solven.eu/agrivision/oauth-callback.html";
 
+// === Google Drive (storage — separate from Google identity above) ===
+// Drive uses the SAME OAuth client (GOOGLE_CLIENT_ID) but a different, storage-only scope and a
+// different mechanism: the Google Identity Services token client (short-lived access tokens,
+// refreshed silently in the browser). NO refresh token is stored, NO client secret, NO Worker
+// round-trip — the Drive access token never leaves the browser and is fully separate from the
+// identity id_token / agri_session (connecting Drive is a pure storage action).
+//   `drive.file` = app-created files only (privacy-respecting, analog of Dropbox's App folder).
+// Google Cloud Console one-time setup on the existing client (project agrivision-498206):
+//   1. APIs & Services → Library → enable "Google Drive API".
+//   2. OAuth consent screen → add the scope `.../auth/drive.file` (non-sensitive → no verification).
+//   3. Authorized JavaScript origins must include every serving origin (http://localhost:8000 +
+//      prod). The GIS token client needs the origin registered; no redirect URI is used here.
+export const GDRIVE_ENABLED = true; // set false to hide the "Connecter Google Drive" button
+export const GDRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+export const GDRIVE_APP_ROOT = "AgriVision"; // single root folder created in the user's Drive
+export const GIS_SCRIPT_URL = "https://accounts.google.com/gsi/client";
+
 // Facebook: create an app at https://developers.facebook.com/apps (product: Facebook Login).
 //   - Add your origin under "Allowed Domains for the JavaScript SDK".
 //   - Set the App Secret on the Worker as FACEBOOK_APP_SECRET, and FACEBOOK_APP_ID in its env.

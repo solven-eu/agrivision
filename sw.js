@@ -5,7 +5,7 @@
 // A new SW waits (no auto-skipWaiting) until the page asks it to activate via SKIP_WAITING,
 // so the user gets an "update ready" prompt instead of a surprise mid-session swap.
 // Bump CACHE_VERSION only for a hard purge (e.g. a breaking cache-shape change).
-const CACHE_VERSION = "agriv-v7";
+const CACHE_VERSION = "agriv-v9";
 const APP_SHELL = [
   "./",
   "./index.html",

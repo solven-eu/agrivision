@@ -1,13 +1,29 @@
 :root {
-  --bg: #0f1419;
-  --panel: #1a2128;
-  --panel2: #232b34;
-  --border: #2f3a45;
-  --text: #e6edf3;
-  --muted: #8b98a5;
-  --accent: #4ade80;
-  --warn: #fbbf24;
-  --bad: #f87171;
+  /* Biotech-premium palette — matches agrivision.re (light theme) */
+  --bone: #fafbf7;
+  --paper: #f3f5ec;
+  --warm: #edefe4;
+  --moss-50: #e8f0e5;
+  --moss-100: #c8d9c0;
+  --moss-300: #7ea679;
+  --moss-500: #3f7a42;
+  --moss-600: #2f5c33;
+  --moss-800: #1a3c1d;
+  --gold: #c9a24b;
+  --ink: #0a1410;
+
+  /* App aliases (consumed across the whole UI) — remapped onto the biotech palette so the
+     dark→light switch flows everywhere that uses var(--bg/panel/text/...). */
+  --bg: #fafbf7; /* app background (bone) */
+  --panel: #f3f5ec; /* sidebar + cards (paper) */
+  --panel2: #edefe4; /* nested panels (warm) */
+  --border: rgba(10, 20, 16, 0.12);
+  --text: #0a1410; /* ink */
+  --muted: #5a6b62; /* ink-3 */
+  --accent: #2f5c33; /* moss-600 — primary green */
+  --on-accent: #fafbf7; /* readable text/icon on the green accent */
+  --warn: #c9a24b; /* gold */
+  --bad: #ae4545; /* danger */
 }
 * {
   box-sizing: border-box;
@@ -16,8 +32,11 @@ html,
 body {
   height: 100%;
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: var(--bg);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* Soft biotech wash — moss tint rising from the bottom into bone, like agrivision.re */
+  background:
+    radial-gradient(ellipse 100% 70% at 50% 100%, var(--moss-50), transparent 70%),
+    var(--bg);
   color: var(--text);
 }
 #app {
@@ -39,7 +58,7 @@ body {
    auto-fit of the selected parcels. */
 .recadrer-btn {
   background: var(--accent);
-  color: #0a0e13;
+  color: var(--on-accent);
   border: none;
   border-radius: 6px;
   font-size: 12px;
@@ -50,6 +69,29 @@ body {
 }
 .recadrer-btn:hover {
   filter: brightness(1.08);
+}
+
+/* On-map "Aérien" (Ortho IGN) toggle — sits top-right next to Recadrer. Off = subtle, On = green. */
+.map-ortho-btn {
+  display: block;
+  margin-bottom: 8px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 12px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+.map-ortho-btn.on {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+}
+.map-ortho-btn:hover {
+  filter: brightness(1.05);
 }
 
 /* On-map parcel detail sheet — slides in from the right edge of the map, vertically
@@ -114,7 +156,7 @@ body {
 /* ===== Camera capture button (prominent green) ===== */
 button.primary-capture {
   background: var(--accent);
-  color: #0a0e13;
+  color: var(--on-accent);
   font-size: 14px;
   font-weight: 700;
   padding: 10px 14px;
@@ -131,7 +173,7 @@ button.primary-capture {
   height: 56px;
   border-radius: 50%;
   background: var(--accent);
-  color: #0a0e13;
+  color: var(--on-accent);
   border: none;
   font-size: 24px;
   cursor: pointer;
@@ -340,9 +382,14 @@ button.primary-capture {
   text-transform: uppercase;
   letter-spacing: 1px;
   color: var(--muted);
-  margin: 16px 0 6px;
+  /* Keep the inter-section spacing as PADDING (clickable), not margin (dead zone) — so a click
+     anywhere on the title block, including the gap above the text, toggles the section. */
+  margin: 4px 0 4px;
   list-style: none;
-  padding: 4px 0;
+  display: block;
+  width: 100%;
+  padding: 12px 6px 8px;
+  border-radius: 6px;
 }
 .advanced > summary::-webkit-details-marker {
   display: none;
@@ -361,15 +408,19 @@ button.primary-capture {
   color: var(--text);
 }
 h1 {
-  font-size: 16px;
+  font-family: "Fraunces", Georgia, "Times New Roman", serif;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--moss-800);
   margin: 0 0 12px;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.2px;
 }
 h2 {
+  font-family: "Fraunces", Georgia, serif;
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: var(--muted);
+  color: var(--moss-600);
   margin: 16px 0 6px;
 }
 label {
@@ -396,7 +447,7 @@ input[type="file"] {
 }
 button {
   background: var(--accent);
-  color: #0a0e13;
+  color: var(--on-accent);
   border: none;
   padding: 8px 12px;
   border-radius: 6px;
@@ -440,7 +491,7 @@ button.secondary {
 }
 .chip.on {
   background: var(--accent);
-  color: #0a0e13;
+  color: var(--on-accent);
   border-color: var(--accent);
 }
 #status {
@@ -519,6 +570,9 @@ details summary {
   cursor: pointer;
   font-size: 12px;
   color: var(--muted);
+  /* Full-width click target — toggle on a click anywhere on the row, not just the text. */
+  display: block;
+  width: 100%;
 }
 pre {
   font-size: 11px;
@@ -680,21 +734,85 @@ a {
 .map-placing {
   cursor: crosshair !important;
 }
+/* Prominent "the app is waiting for a map click" banner (photo place / aim modes). */
+#map-wait-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1001;
+  display: none;
+  align-items: center;
+  gap: 12px;
+  background: var(--moss-800);
+  color: var(--bone);
+  border: 1px solid var(--gold);
+  border-radius: 999px;
+  padding: 8px 10px 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  max-width: calc(100% - 24px);
+  animation: map-wait-pulse 1.6s ease-in-out infinite;
+}
+#map-wait-banner button {
+  background: var(--gold);
+  color: var(--ink);
+  border: none;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+@keyframes map-wait-pulse {
+  0%,
+  100% {
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35), 0 0 0 0 rgba(201, 162, 75, 0.5);
+  }
+  50% {
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35), 0 0 0 6px rgba(201, 162, 75, 0);
+  }
+}
 .lock-hint {
-  background: rgba(15, 20, 25, 0.9);
+  background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 6px 10px;
+  padding: 5px 6px 5px 10px;
   font-size: 12px;
   font-weight: 600;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  /* Inline display is set in JS (none/flex); these only apply when shown. */
+  gap: 8px;
+  align-items: center;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
   cursor: pointer;
   user-select: none;
   transition:
     background 0.15s,
     border-color 0.15s,
     transform 0.15s;
+}
+.lock-hint .lock-toggle-btn {
+  flex: none;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 9px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.lock-hint.locked .lock-toggle-btn {
+  background: var(--warn);
+  color: var(--ink);
+}
+.lock-hint .lock-toggle-btn:hover {
+  filter: brightness(1.06);
 }
 .lock-hint.locked {
   border-color: var(--warn);
@@ -704,15 +822,31 @@ a {
   border-color: var(--accent);
   color: var(--accent);
 }
+/* Blink the lock badge 2–3× when a click is ignored because parcels are locked, so the user
+   clearly sees their click was intentionally refused. */
 .lock-hint.flash {
-  transform: scale(1.08);
-  background: var(--warn);
-  color: #0a0e13;
-  border-color: var(--warn);
+  animation: lock-flash 0.9s ease both;
+}
+@keyframes lock-flash {
+  0%,
+  40%,
+  80% {
+    transform: scale(1);
+    background: var(--warn);
+    color: var(--ink);
+    border-color: var(--warn);
+    box-shadow: 0 0 0 4px rgba(201, 162, 75, 0.4);
+  }
+  20%,
+  60%,
+  100% {
+    transform: scale(1.12);
+    box-shadow: 0 0 0 0 rgba(201, 162, 75, 0);
+  }
 }
 .select-hint {
   background: var(--accent);
-  color: #0a0e13;
+  color: var(--on-accent);
   padding: 10px 16px;
   border-radius: 8px;
   font-size: 14px;
@@ -761,7 +895,7 @@ a {
 }
 .chat-msg.user {
   background: var(--accent);
-  color: #0a0e13;
+  color: var(--on-accent);
   align-self: flex-end;
 }
 .chat-msg.assistant {
@@ -788,7 +922,7 @@ a {
 }
 .chat-action:hover {
   background: var(--accent);
-  color: #0a0e13;
+  color: var(--on-accent);
 }
 .chat-typing {
   color: var(--muted);

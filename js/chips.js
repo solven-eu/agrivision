@@ -12,7 +12,7 @@
 import { IGN_WMS, RPG_LAYER, CADASTRE_LAYER } from "./config.js";
 
 /**
- * @param {object} app - { map (Leaflet), getPendingDbxLoad (fn) → boolean }
+ * @param {object} app - { map (Leaflet), getPendingRestore (fn) → boolean }
  * @returns {{ refreshChips: fn, refreshRpgLayer: fn }} - refreshChips is kept as an alias of
  *   refreshRpgLayer so existing callers (persistence.js, after a Dropbox restore) keep working
  *   without change.
@@ -52,7 +52,7 @@ export function installChips(app) {
 
   // Initial RPG render — deferred when a Dropbox restore is imminent (the layer would be re-added
   // anyway once loadSession → refreshRpgLayer runs for the restored parcels' view).
-  if (!app.getPendingDbxLoad()) {
+  if (!app.getPendingRestore()) {
     rpgLayer = buildRpgLayer().addTo(app.map);
   }
 

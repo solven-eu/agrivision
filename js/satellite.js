@@ -293,6 +293,38 @@ export function createSatellite(app) {
     "https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=ORTHOIMAGERY.ORTHOPHOTOS&STYLE=normal&TILEMATRIXSET=PM&FORMAT=image/jpeg&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}";
   const ortho = { layer: null, on: false };
 
+  // On-map Ortho toggle — a Leaflet control sitting top-right (next to "Recadrer"), so the aerial
+  // view is reachable from the map itself, not only the Satellite tools section.
+  let _orthoBtn = null;
+  function updateOrthoBtn() {
+    if (!_orthoBtn) return;
+    _orthoBtn.innerHTML = ortho.on ? "🛰️ Aérien ✓" : "🛰️ Aérien";
+    _orthoBtn.title = ortho.on
+      ? "Masquer la vue aérienne IGN"
+      : "Afficher la vue aérienne haute résolution (IGN BD ORTHO ~20 cm)";
+    _orthoBtn.classList.toggle("on", ortho.on);
+  }
+  function ensureOrthoControl() {
+    if (_orthoBtn || !window.L) return;
+    const Ctrl = window.L.Control.extend({
+      options: { position: "topright" },
+      onAdd() {
+        const btn = window.L.DomUtil.create("button", "map-ortho-btn");
+        btn.type = "button";
+        window.L.DomEvent.disableClickPropagation(btn);
+        window.L.DomEvent.on(btn, "click", (e) => {
+          window.L.DomEvent.stop(e);
+          toggleOrtho();
+        });
+        _orthoBtn = btn;
+        updateOrthoBtn();
+        return btn;
+      },
+    });
+    app.map.addControl(new Ctrl());
+  }
+  ensureOrthoControl();
+
   function toggleOrtho() {
     if (ortho.on) {
       if (ortho.layer) app.map.removeLayer(ortho.layer);
@@ -310,6 +342,7 @@ export function createSatellite(app) {
       ortho.layer.addTo(app.map);
       ortho.on = true;
     }
+    updateOrthoBtn();
     render();
   }
 
@@ -378,7 +411,7 @@ export function createSatellite(app) {
           .map((it) => {
             if (it.kind === "sat") {
               const active = it.day === state.activeDay;
-              return `<button class="sat-day" data-day="${it.day}" title="Afficher cette image satellite sur la carte" style="display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;font-size:11px;padding:4px 8px;border:1px solid ${active ? "var(--accent)" : "var(--border)"};background:${active ? "var(--panel2)" : "transparent"};border-radius:4px;cursor:pointer">
+              return `<button class="sat-day" data-day="${it.day}" title="Afficher cette image satellite sur la carte" style="display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;font-size:11px;padding:4px 8px;border:1px solid ${active ? "var(--accent)" : "var(--border)"};background:${active ? "var(--panel2)" : "transparent"};color:var(--text);border-radius:4px;cursor:pointer">
                   <span>🛰️ ${fmtDay(it.day)}${active ? " ✓ affichée" : ""}</span>${cloudBadge(it.cloud)}
                 </button>`;
             }

@@ -5,6 +5,7 @@
 
 import { formatRelativeDays, fmtEUR } from "./util.js";
 import { CULTU_LABELS, DISEASE_CATALOG, lookupCropImage, lookupTaxonImage } from "./catalog.js";
+import { toast } from "./toast.js";
 
 // FR labels for the application_method enum (matches the prompt taxonomy).
 const APPLICATION_METHOD_LABELS = {
@@ -108,6 +109,29 @@ export function treatmentTotalCost(t) {
 export function renderMetrics(m, hooks = {}) {
   const el = document.getElementById("metrics");
   el.innerHTML = "";
+  // Explicit empty state — without this the "Grille normalisée" section just looked blank/broken
+  // when no analysis had run. Show what's missing and a one-tap way to trigger the AI analysis.
+  if (!m || !m.identification) {
+    const box = document.createElement("div");
+    box.style.cssText = "grid-column:1/-1;text-align:center;padding:12px 6px;color:var(--muted)";
+    box.innerHTML = `<div class="small" style="margin-bottom:8px">Aucune analyse IA pour l'instant — la grille se remplit après une analyse.</div>`;
+    const btn = document.createElement("button");
+    btn.style.cssText = "font-size:12px;padding:6px 12px";
+    btn.textContent = "🔬 Lancer l'analyse IA";
+    btn.onclick = () => {
+      // Open the chat section (where the analysis runs + shows its own status), then start it if
+      // possible. Don't show a misleading "add a photo" toast — the chat section's status line
+      // already says exactly what's missing (and may be blocked by an upstream error, not inputs).
+      const sec = document.getElementById("chat-section");
+      if (sec && !sec.open) sec.open = true;
+      sec?.scrollIntoView({ behavior: "smooth", block: "start" });
+      const start = document.getElementById("chat-start");
+      if (start && !start.disabled) start.click();
+    };
+    box.appendChild(btn);
+    el.appendChild(box);
+    return;
+  }
   const cell = (k, v, opts = {}) => {
     const d = document.createElement("div");
     d.className = "cell" + (opts.full ? " full" : "");

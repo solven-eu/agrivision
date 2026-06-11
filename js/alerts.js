@@ -105,7 +105,16 @@ export function createAlerts(app) {
       if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
       state.subscribed = true;
       localStorage.setItem("rain_alerts", "1");
-      state.info = `Alertes actives sur ${j.parcels} parcelle(s). Seuil : ≥ 2 mm/jour.`;
+      state.info = `✓ C'est activé — tu recevras une notification AVANT la pluie sur ${j.parcels} parcelle(s) (seuil ≥ 2 mm/jour), même app fermée.`;
+      // Fire an immediate confirmation notification so the user SEES that notifications now work.
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        await reg.showNotification("✅ Alertes pluie activées", {
+          body: `Surveillance de ${j.parcels} parcelle(s) — tu seras prévenu avant la pluie.`,
+          icon: "icon-192.png",
+          tag: "agri-rain-activated",
+        });
+      } catch {}
     } catch (e) {
       state.error = e.message;
     } finally {
@@ -116,16 +125,18 @@ export function createAlerts(app) {
 
   async function unsubscribe() {
     state.busy = true;
+    // Flip to "off" locally FIRST so the panel always shows the re-activate button afterwards —
+    // even if the SW or server call below throws, the UI must not get stuck on the active controls.
+    state.subscribed = false;
+    localStorage.removeItem("rain_alerts");
+    state.error = null;
     render();
     try {
       const reg = await navigator.serviceWorker.ready;
       const sub = await reg.pushManager.getSubscription();
       if (sub) await sub.unsubscribe().catch(() => {});
       await fetch(`${base()}/api/alerts/unsubscribe`, { method: "POST", headers: workerAuthHeader() }).catch(() => {});
-      state.subscribed = false;
-      localStorage.removeItem("rain_alerts");
       state.info = "Alertes désactivées.";
-      state.error = null;
     } finally {
       state.busy = false;
       render();
@@ -143,17 +154,31 @@ export function createAlerts(app) {
     render();
     try {
       const reg = await navigator.serviceWorker.ready;
-      const sub = await reg.pushManager.getSubscription();
-      const r = await fetch(`${base()}/api/alerts/test`, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...workerAuthHeader() },
-        body: JSON.stringify({ subscription: sub?.toJSON() }),
+      // 1) Instant LOCAL notification — appears right away, no server/push-service round-trip, so
+      //    the user immediately sees that notifications work.
+      await reg.showNotification("🌧️ Test — AgriVision", {
+        body: "Si tu vois ceci, les alertes pluie fonctionnent ✓",
+        icon: "icon-192.png",
+        tag: "agri-rain-test",
       });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(j.error || j.detail || `HTTP ${r.status}`);
-      state.info = "Notif de test envoyée — verrouille ton écran, elle arrive dans quelques secondes.";
+      state.info = "Notif de test affichée ✓";
+      // 2) Also exercise the REAL server → Web Push path (best-effort; reported separately so a
+      //    server hiccup doesn't hide that the local notification worked).
+      try {
+        const sub = await reg.pushManager.getSubscription();
+        const r = await fetch(`${base()}/api/alerts/test`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...workerAuthHeader() },
+          body: JSON.stringify({ subscription: sub?.toJSON() }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || j.detail || `HTTP ${r.status}`);
+        state.info = "Notif de test affichée immédiatement ✓ — une notif serveur (push réel) arrive aussi dans quelques secondes.";
+      } catch (e) {
+        state.info = "Notif locale affichée ✓ — mais le push serveur a échoué : " + e.message;
+      }
     } catch (e) {
-      state.error = e.message;
+      state.error = "Impossible d'afficher la notification : " + e.message;
     } finally {
       state.busy = false;
       render();
@@ -182,7 +207,9 @@ export function createAlerts(app) {
           <button id="alerts-off" class="secondary" style="font-size:11px;padding:5px 10px"${state.busy ? " disabled" : ""}>Désactiver</button>
         </div>`;
     } else {
-      controls = `<button id="alerts-on" class="secondary" style="font-size:11px;padding:5px 10px"${state.busy || !cap.ok ? " disabled" : ""}>${state.busy ? "…" : "🔔 Activer les alertes pluie"}</button>`;
+      // Don't pre-disable on !cap.ok — let the user click and learn WHY (subscribe() surfaces the
+      // capability reason). Pre-disabling left users with a dead, unexplained button.
+      controls = `<button id="alerts-on" class="secondary" style="font-size:11px;padding:5px 10px"${state.busy ? " disabled" : ""}>${state.busy ? "…" : "🔔 Activer les alertes pluie"}</button>`;
     }
 
     wrap.innerHTML = `

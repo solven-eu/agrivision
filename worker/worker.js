@@ -461,6 +461,8 @@ export default {
       const session = await mintAgriSession(env, claims.sub, {
         provider: claims.provider || null,
         email: claims.email || null,
+        email_verified: claims.email_verified === true, // carry the original verification forward
+        created_at: claims.created_at || (await accountCreatedAt(env, claims.sub)), // and the join date
       });
       return json({ agri_session: session.token, exp: session.exp, sub: claims.sub }, 200, origin);
     }
@@ -542,9 +544,12 @@ export default {
         });
         if (!anchor.ok)
           return json({ error: "email_taken", existing_provider: anchor.existing_provider }, 409, origin);
+        const acct = await ensureAccount(env, sub, "dropbox");
         const session = await mintAgriSession(env, sub, {
           provider: "dropbox",
           email: claims.email || null,
+          email_verified: claims.email_verified === true,
+          created_at: acct.created_at,
         });
         return json({ agri_session: session.token, exp: session.exp, sub }, 200, origin);
       } catch (e) {
@@ -579,9 +584,12 @@ export default {
         });
         if (!anchor.ok)
           return json({ error: "email_taken", existing_provider: anchor.existing_provider }, 409, origin);
+        const acct = await ensureAccount(env, sub, "google");
         const session = await mintAgriSession(env, sub, {
           provider: "google",
           email: claims.email || null,
+          email_verified: claims.email_verified === true,
+          created_at: acct.created_at,
         });
         return json({ agri_session: session.token, exp: session.exp, sub }, 200, origin);
       } catch (e) {
@@ -616,9 +624,12 @@ export default {
         });
         if (!anchor.ok)
           return json({ error: "email_taken", existing_provider: anchor.existing_provider }, 409, origin);
+        const acct = await ensureAccount(env, sub, "facebook");
         const session = await mintAgriSession(env, sub, {
           provider: "facebook",
           email: fb.email,
+          email_verified: false, // Facebook never asserts email verification
+          created_at: acct.created_at,
         });
         return json({ agri_session: session.token, exp: session.exp, sub }, 200, origin);
       } catch (e) {
@@ -782,7 +793,7 @@ export default {
       }
       const who = await resolveAccount(req, env);
       if (who.error) return json({ error: who.error }, who.status, origin);
-      const plan = await loadPlan(env, who.accountId);
+      const plan = await effectivePlan(env, who.accountId, who.email, who.emailVerified, who.createdAt); // incl. org-inherited tier
       const limits = quotasForTier(plan.tier);
       if (limits.max_tokens_in_per_period === 0) {
         return json(
@@ -1051,6 +1062,39 @@ async function resolveEmailAnchor(env, { sub, provider, email, emailVerified }) 
   return { ok: true };
 }
 
+// Account record keyed by the immutable sub (works for sub-only / no-email accounts too). Records
+// the account's first-seen timestamp ONCE — used for "early adopter" org gating (created_before).
+// Returns the meta; writes it only if absent (idempotent). created_at is an ISO string so it can be
+// compared lexicographically with an org's `created_before`.
+async function ensureAccount(env, sub, provider) {
+  if (!env.SHARE_KV) return { created_at: null };
+  const key = `account/${sub}.json`;
+  const raw = await env.SHARE_KV.get(key).catch(() => null);
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      /* fall through and rewrite */
+    }
+  }
+  const meta = { created_at: new Date().toISOString(), provider: provider || null };
+  await env.SHARE_KV.put(key, JSON.stringify(meta)).catch(() => {});
+  return meta;
+}
+
+// Read-only account creation date (ISO string) or null. Fallback for sessions minted before
+// created_at was added to the JWT.
+async function accountCreatedAt(env, sub) {
+  if (!env.SHARE_KV) return null;
+  const raw = await env.SHARE_KV.get(`account/${sub}.json`).catch(() => null);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw).created_at || null;
+  } catch {
+    return null;
+  }
+}
+
 // ============= AgriVision session JWT (HS256) — mint + verify =============
 async function mintAgriSession(env, sub, extras = {}) {
   if (!env.AGRI_JWT_SECRET) throw new Error("AGRI_JWT_SECRET not configured");
@@ -1133,7 +1177,18 @@ async function resolveAccount(req, env) {
       message: "Session AgriVision invalide ou expirée — reconnectez-vous à Dropbox.",
       status: 401,
     };
-  return { accountId: claims.sub, email: claims.email || null };
+  return {
+    accountId: claims.sub,
+    email: claims.email || null,
+    // Tri-state: true (provider asserted verified) / false (asserted NOT verified, e.g. Facebook) /
+    // null (unknown — a session minted before email_verified existed). Org-by-email matching treats
+    // only `true` as allowed (fail closed); the dashboard warns only on explicit `false`, so an old
+    // Google/Dropbox session doesn't get a false "unverified" scare.
+    emailVerified:
+      claims.email_verified === true ? true : claims.email_verified === false ? false : null,
+    provider: claims.provider || null,
+    createdAt: claims.created_at || null,
+  };
 }
 
 function defaultQuota() {
@@ -1190,7 +1245,7 @@ async function shareSave(req, env, origin) {
   if (!manifest?.culture_id) return json({ error: "manifest.culture_id required" }, 400, origin);
   const base = `share/${who.accountId}/cultures/${manifest.culture_id}`;
   const quota = await loadQuota(env, who.accountId);
-  const plan = await loadPlan(env, who.accountId);
+  const plan = await effectivePlan(env, who.accountId, who.email, who.emailVerified, who.createdAt); // incl. org-inherited tier
   const limits = quotasForTier(plan.tier);
 
   // Pre-flight: reject the whole batch if any single photo is oversized, or if accepting
@@ -2046,10 +2101,139 @@ async function loadPlan(env, accountId) {
 
 async function savePlan(env, accountId, plan) {
   if (!env.SHARE_KV) return;
+  // Persist ONLY the user's own purchase. Org-inherited fields (tier bump, orgs, sponsored_by) are
+  // computed at read time by effectivePlan and must never be written back, or they'd pollute the
+  // stored plan (e.g. an org upgrade would stick after the org link is removed).
+  const { orgs, sponsored_by, ...own } = plan;
   await env.SHARE_KV.put(
     `share/${accountId}/plan.json`,
-    JSON.stringify({ ...plan, updated_at: new Date().toISOString() })
+    JSON.stringify({ ...own, updated_at: new Date().toISOString() })
   );
+}
+
+// ============================================================================
+// Organizations — a farmer inherits the plan of any organization they belong to. Orgs model
+// arbitrary financing contracts (mairie, département, région, collectivité, banque, programme de
+// soutien…) that Stripe can't express, so membership is just a table: org ↔ allowed users. A user
+// can belong to several; their effective tier is the HIGHEST granted by any of them or their own
+// purchase. Inheritance is computed at READ time (effectivePlan) and never persisted.
+//
+// An org matches a user in two complementary ways:
+//   • email_pattern — a case-insensitive regex over the email. ".*" = everybody (the old
+//     includes_all), "@saint-paul\\.re$" = a whole domain in one line, etc.
+//   • roster (opt-in) — an explicit KV list at org/<id>/members.json = { subs:[...], emails:[...] }
+//     for ad-hoc members who don't fit the pattern. Only read when `roster: true`, so pattern-only
+//     orgs (the common case) cost zero KV reads.
+// Emails can be pre-authorized before the person ever signs up — they inherit the org the moment
+// they sign in with a matching email.
+// ============================================================================
+// Early-access cutoff (date D): accounts whose first-seen date is BEFORE this get the Early Birds
+// plan. Set it to your real early-access deadline. Accounts created on/after D are normal Free.
+const EARLY_BIRDS_CUTOFF = "2026-09-01T00:00:00.000Z"; // TODO: set to the actual cutoff date D
+
+const ORGANIZATIONS = {
+  // require_verified:false because ".*" grants the SAME tier to everyone — there's no email to
+  // impersonate for gain, so we don't want to exclude unverified / no-email users from the promo.
+  // created_before gates it to genuine early adopters (registered before date D).
+  // Targeted orgs (a domain, a roster) default to require_verified:true so a forged/unverified
+  // email can't claim someone else's sponsored plan; add created_before to date-gate them too.
+  early_birds: {
+    id: "early_birds",
+    label: "Early Birds",
+    tier: "standard",
+    email_pattern: ".*",
+    require_verified: false,
+    created_before: EARLY_BIRDS_CUTOFF,
+  },
+};
+const TIER_RANK = { free: 0, standard: 1, premium: 2 };
+
+// Compiled-regex cache so we don't rebuild RegExp objects on every request.
+const _orgPatternCache = new Map();
+function orgEmailRegex(pattern) {
+  if (_orgPatternCache.has(pattern)) return _orgPatternCache.get(pattern);
+  let re = null;
+  try {
+    re = new RegExp(pattern, "i");
+  } catch {
+    re = null; // a malformed pattern simply matches nobody (never throws at request time)
+  }
+  _orgPatternCache.set(pattern, re);
+  return re;
+}
+
+// Orgs this account belongs to. Email-based matches (pattern + roster emails) require a VERIFIED
+// email unless the org opts out (require_verified:false) — otherwise a forged/unverified address
+// could claim a targeted org's plan. Sub-based matches are always trusted (the sub comes from the
+// signed session). Best-effort — never throws (a KV hiccup or bad pattern just means "no extra
+// orgs", never a blocked user).
+async function orgsForAccount(env, accountId, email, emailVerified, createdAt) {
+  const out = [];
+  const emailLc = (email || "").trim().toLowerCase();
+  for (const org of Object.values(ORGANIZATIONS)) {
+    // Date gate (early-adopter orgs): skip only when we KNOW the account was created on/after the
+    // cutoff. An unknown creation date means a pre-deploy session (claims are signed, so it can't
+    // be forged) — those are legitimately early, so fail OPEN; it self-corrects as old sessions
+    // expire and every new login stamps created_at.
+    if (org.created_before && createdAt && createdAt >= org.created_before) continue;
+    // Only trust the email for matching when it's verified, or when the org explicitly allows
+    // unverified emails (e.g. Early Birds' universal ".*").
+    const emailAllowed = emailVerified === true || org.require_verified === false;
+    let match = false;
+    // 1) Regex over the email. ".*" matches even an empty string → true "everybody"; a domain
+    //    pattern like "@x.re$" won't.
+    if (org.email_pattern && emailAllowed) {
+      const re = orgEmailRegex(org.email_pattern);
+      if (re && re.test(emailLc)) match = true;
+    }
+    // 2) Explicit KV roster (only when opted in) — sub (always trusted) or exact email (gated).
+    if (!match && org.roster) {
+      try {
+        const raw = env.SHARE_KV ? await env.SHARE_KV.get(`org/${org.id}/members.json`) : null;
+        const m = raw ? JSON.parse(raw) : null;
+        const subMatch = !!m && accountId && m.subs?.includes(accountId);
+        const emailMatch =
+          !!m && emailAllowed && emailLc && m.emails?.some((e) => String(e).trim().toLowerCase() === emailLc);
+        match = !!(subMatch || emailMatch);
+      } catch {
+        /* ignore — org membership is additive, never blocking */
+      }
+    }
+    if (match) out.push(org);
+  }
+  return out;
+}
+
+// The user's plan with org inheritance applied: tier bumped to the highest tier any org grants,
+// plus `orgs` + `sponsored_by` for the UI ("financé par X"). Read-only; does NOT persist.
+async function effectivePlan(env, accountId, email, emailVerified, createdAt) {
+  const plan = await loadPlan(env, accountId);
+  // Date-gated orgs need the creation date. Prefer the session claim; only hit KV (fallback for
+  // pre-created_at sessions) when a date-gated org actually exists and the session didn't carry it.
+  let created = createdAt || null;
+  if (!created && Object.values(ORGANIZATIONS).some((o) => o.created_before)) {
+    created = await accountCreatedAt(env, accountId);
+  }
+  const orgs = await orgsForAccount(env, accountId, email, emailVerified, created);
+  const ownTier = plan.tier || "free"; // the user's OWN purchased tier (before org inheritance)
+  let tier = ownTier;
+  let sponsor = null;
+  for (const org of orgs) {
+    if ((TIER_RANK[org.tier] ?? 0) > (TIER_RANK[tier] ?? 0)) {
+      tier = org.tier;
+      sponsor = org;
+    }
+  }
+  return {
+    ...plan,
+    tier, // effective tier (max of own + org)
+    own_tier: ownTier, // what the user actually paid for — drives "manage subscription" visibility
+    email: email || null,
+    email_verified: emailVerified === true ? true : emailVerified === false ? false : null, // tri-state
+    created_at: created || null,
+    orgs: orgs.map((o) => ({ id: o.id, label: o.label, tier: o.tier })),
+    sponsored_by: sponsor ? { id: sponsor.id, label: sponsor.label, tier: sponsor.tier } : null,
+  };
 }
 
 // POST /api/billing/checkout — { lookup_key, success_url, cancel_url } → { checkout_url }
@@ -2255,7 +2439,7 @@ async function mistralAnalyze(req, env, origin) {
       );
     const who = await resolveAccount(req, env);
     if (who.error) return json({ error: who.error }, who.status, origin);
-    const plan = await loadPlan(env, who.accountId);
+    const plan = await effectivePlan(env, who.accountId, who.email, who.emailVerified, who.createdAt); // incl. org-inherited tier
     const limits = quotasForTier(plan.tier);
     if (limits.max_tokens_in_per_period === 0)
       return json(
@@ -2557,7 +2741,7 @@ async function shareQuota(req, env, origin) {
   const who = await resolveAccount(req, env);
   if (who.error) return json({ error: who.error }, who.status, origin);
   const q = await loadQuota(env, who.accountId);
-  const plan = await loadPlan(env, who.accountId);
+  const plan = await effectivePlan(env, who.accountId, who.email, who.emailVerified, who.createdAt); // incl. org-inherited tier + sponsored_by
   return json({ quota: q, limits: quotasForTier(plan.tier), plan }, 200, origin);
 }
 

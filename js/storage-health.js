@@ -78,13 +78,14 @@ export function checkStorageHealth({ force = false } = {}) {
   _warnedThisSession = true;
 
   const mb = (bytes / (1024 * 1024)).toFixed(1);
-  const hasDropbox = !!localStorage.getItem("dbx_token");
+  const hasCloud =
+    !!localStorage.getItem("dbx_token") || !!localStorage.getItem("gdrive_connected");
   // Photos are the bulk of what fills the store (the local session mirror inlines their bytes), so
   // the most direct remedy is re-compressing them — offered as the toast action in both cases.
-  // Connecting Dropbox is the other durable fix; for non-Dropbox users we surface it in the text.
-  const message = hasDropbox
-    ? `Stockage local presque plein (${mb} Mo). Réduis la qualité des photos pour libérer de l'espace (tes données restent sur Dropbox).`
-    : `Stockage local presque plein (${mb} Mo). Réduis la qualité des photos, ou connecte Dropbox, pour libérer le stockage local.`;
+  // Connecting a cloud is the other durable fix; for local-only users we surface it in the text.
+  const message = hasCloud
+    ? `Stockage local presque plein (${mb} Mo). Réduis la qualité des photos pour libérer de l'espace (tes données restent dans le cloud).`
+    : `Stockage local presque plein (${mb} Mo). Réduis la qualité des photos, ou connecte un stockage cloud, pour libérer le stockage local.`;
   toast(message, {
     kind: "warn",
     id: "storage-full",

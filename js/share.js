@@ -9,6 +9,7 @@
 // prefix in KV. No analytics, no third parties.
 
 import { WORKER_URL } from "./config.js";
+import { toast } from "./toast.js";
 
 const LS = {
   enabled: "share_enabled",
@@ -99,10 +100,9 @@ async function tradeForSession(path, payload) {
             detail: { reason: "email_taken", existing_provider: j.existing_provider || null },
           })
         );
-        alert(
-          `Un compte existe déjà avec cette adresse e-mail, créé via ${orig}.\n\n` +
-            `Connecte-toi avec ${orig} pour l'instant — la fusion de comptes (utiliser plusieurs ` +
-            `méthodes de connexion) arrivera prochainement.`
+        toast(
+          `Un compte existe déjà avec cette adresse e-mail, créé via ${orig}. Connecte-toi avec ${orig} pour l'instant — la fusion de comptes arrivera prochainement.`,
+          { kind: "warn", durationMs: 12000, id: "email-taken" }
         );
         return null;
       }
@@ -344,8 +344,10 @@ export function createShare(app) {
   let lastLimits = null;
 
   async function fetchQuota() {
-    if (!state.enabled) return;
-    const tok = dbxToken();
+    // The plan/quota is a property of the logged-in ACCOUNT, not of the "Share with AgriVision"
+    // opt-in — so don't gate on state.enabled (that bug left non-sharing users showing tier=free,
+    // e.g. an Early-Birds member being offered to BUY the Standard plan they already have).
+    const tok = dbxToken(); // = agri_session
     if (!tok || !WORKER_URL) return;
     try {
       const r = await fetch(`${WORKER_URL.replace(/\/$/, "")}/api/share/quota`, {
@@ -356,6 +358,17 @@ export function createShare(app) {
       lastQuota = j.quota;
       lastLimits = j.limits;
       if (j.plan?.tier) window.__lastPlanTier = j.plan.tier;
+      // The user's OWN purchased tier (before org inheritance) — drives "manage subscription".
+      window.__lastOwnTier = j.plan?.own_tier || "free";
+      // Org sponsorship (e.g. "financé par Early Birds") — surfaced in the plans modal + dashboard.
+      window.__lastPlanSponsor = j.plan?.sponsored_by || null;
+      window.__lastOrgs = Array.isArray(j.plan?.orgs) ? j.plan.orgs : [];
+      // Email + verification — the dashboard flags an unverified email (e.g. Facebook login),
+      // since org membership by email is only granted to verified addresses.
+      window.__lastEmail = j.plan?.email || null;
+      // Tri-state: true (verified) / false (explicitly unverified, e.g. Facebook) / null|undefined
+      // (unknown — e.g. an old session). We only WARN on explicit false; unknown stays silent.
+      window.__lastEmailVerified = j.plan?.email_verified;
       render();
     } catch {}
   }
@@ -407,11 +420,36 @@ export function createShare(app) {
     const button = state.enabled
       ? `<button id="share-disable" class="secondary" style="font-size:11px;padding:4px 8px">🛑 Arrêter</button>`
       : `<button id="share-enable" class="secondary" style="font-size:11px;padding:4px 8px">🤝 Activer</button>`;
+    // Email-verification badge. An unverified email (typically Facebook, which never asserts
+    // verification) is flagged because org membership by email is only granted to verified
+    // addresses — so a domain/org-sponsored plan won't apply until the email is verified.
+    const email = window.__lastEmail;
+    const ev = window.__lastEmailVerified; // true / false / null|undefined (unknown)
+    const emailLine = !email
+      ? ""
+      : ev === true
+        ? `<div class="small" style="color:var(--muted);margin-top:4px">✓ Email vérifiée · ${email}</div>`
+        : ev === false
+          ? `<div class="small" style="margin-top:6px;padding:6px 8px;border-radius:6px;background:rgba(174,69,69,0.10);border:1px solid var(--bad);color:var(--bad)">
+               ⚠ <b>Email non vérifiée</b> (${email}).<br />Les offres réservées à un domaine ou une organisation ne peuvent pas t'être attribuées tant que l'email n'est pas vérifié. Connecte-toi avec Google ou Dropbox pour vérifier ton adresse.
+             </div>`
+          : `<div class="small" style="color:var(--muted);margin-top:4px">${email}</div>`; // unknown → no scare
+    // Organization membership (e.g. Early Birds) — show which org(s) finance the user's plan.
+    const orgs = window.__lastOrgs || [];
+    const orgLine = orgs.length
+      ? `<div style="margin-top:6px;padding:6px 8px;border-radius:6px;background:var(--moss-50);border:1px solid var(--border);font-size:12px">
+           🏛️ <b>Organisation${orgs.length > 1 ? "s" : ""}</b> : ${orgs
+             .map((o) => `${o.label}${o.tier ? ` <span class="small" style="color:var(--moss-600)">(plan ${o.tier})</span>` : ""}`)
+             .join(", ")}
+         </div>`
+      : "";
     wrap.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;gap:6px">
         <span class="small" style="color:${state.enabled ? "var(--accent)" : "var(--muted)"}">${status}</span>
         ${button}
       </div>
+      ${orgLine}
+      ${emailLine}
       <div class="small" style="color:var(--muted);margin-top:2px">Copie de tes données sur les serveurs AgriVision en plus de Dropbox.</div>
       ${state.enabled ? renderQuota() : ""}
     `;

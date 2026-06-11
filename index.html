@@ -11,7 +11,14 @@
     <link rel="icon" href="favicon-16.png" sizes="16x16" type="image/png" />
     <link rel="icon" href="favicon.ico" sizes="48x48" />
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-    <meta name="theme-color" content="#4ade80" />
+    <meta name="theme-color" content="#fafbf7" />
+    <!-- Biotech-premium type system (matches agrivision.re): Fraunces display + Inter UI + JetBrains mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..600&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -312,9 +319,19 @@
               padding-top: 10px;
               border-top: 1px solid var(--border);
               display: flex;
-              justify-content: flex-end;
+              gap: 6px;
+              justify-content: space-between;
             "
           >
+            <button
+              id="force-refresh-btn"
+              type="button"
+              class="secondary"
+              title="Vider le cache et recharger la dernière version de l'application"
+              style="font-size: 11px; padding: 4px 8px"
+            >
+              🔄 Forcer la mise à jour
+            </button>
             <button
               id="show-tutorial-btn"
               type="button"
@@ -451,7 +468,6 @@
           <div style="margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap">
             <button id="photo-camera" class="primary-capture" type="button">📷 Capturer</button>
             <button id="photo-file" class="secondary" type="button">🖼 Choisir un fichier</button>
-            <button id="photo-compress" class="secondary" type="button" title="Réduire la qualité des photos pour libérer le stockage local">🗜 Réduire la qualité</button>
           </div>
           <input id="photo" type="file" accept="image/*" multiple hidden />
           <input id="photo-cam" type="file" accept="image/*" capture="environment" hidden />

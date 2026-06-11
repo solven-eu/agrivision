@@ -334,19 +334,22 @@ export function createAuth() {
     wrap.querySelector(".auth-dropbox")?.addEventListener("click", loginWithDropbox);
   }
 
-  // When signed in but this device has no local storage connection (no dbx_token), tell the
-  // user WHERE their data lives and offer to reconnect that cloud or restore from the
-  // AgriVision backup. The pointer is non-secret; restore pulls inline photo bytes.
+  // When signed in but this device has no storage connection (no dbx/gdrive token), tell the
+  // user WHERE their data lives and offer to reconnect that cloud or restore from the AgriVision
+  // backup. The pointer is non-secret; restore pulls inline photo bytes.
   async function maybeRenderStorageHint(wrap) {
-    if (localStorage.getItem("dbx_token")) return; // storage already connected here
+    if (localStorage.getItem("dbx_token") || localStorage.getItem("gdrive_connected")) return; // already connected here
     const info = await fetchStoragePointer();
     if (!info) return;
-    const dbx = info.pointer?.providers?.dropbox;
-    if (!dbx && !info.has_mirror) return;
-    const where = dbx?.email_masked
-      ? `Dropbox (${dbx.email_masked})`
-      : dbx
-        ? "Dropbox"
+    const providers = info.pointer?.providers || {};
+    const dbx = providers.dropbox;
+    const gdr = providers.gdrive;
+    if (!dbx && !gdr && !info.has_mirror) return;
+    // Prefer the user's previously-active provider for the "where" label.
+    const where = dbx
+      ? `Dropbox${dbx.email_masked ? ` (${dbx.email_masked})` : ""}`
+      : gdr
+        ? `Google Drive${gdr.email_masked ? ` (${gdr.email_masked})` : ""}`
         : null;
     const hint = document.createElement("div");
     hint.style.cssText =
@@ -354,14 +357,20 @@ export function createAuth() {
     hint.innerHTML = `
       ${where ? `<div style="color:var(--muted)">📦 Tes données sont sauvegardées dans <strong>${escapeHtml(where)}</strong>.</div>` : ""}
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
-        ${dbx ? `<button class="hint-reconnect secondary" style="font-size:11px;padding:4px 8px">↻ Reconnecter Dropbox</button>` : ""}
+        ${dbx ? `<button class="hint-reconnect-dbx secondary" style="font-size:11px;padding:4px 8px">↻ Reconnecter Dropbox</button>` : ""}
+        ${gdr ? `<button class="hint-reconnect-gdr secondary" style="font-size:11px;padding:4px 8px">↻ Reconnecter Google Drive</button>` : ""}
         ${info.has_mirror ? `<button class="hint-restore secondary" style="font-size:11px;padding:4px 8px">⤓ Restaurer depuis AgriVision</button>` : ""}
       </div>`;
     wrap.appendChild(hint);
     hint
-      .querySelector(".hint-reconnect")
+      .querySelector(".hint-reconnect-dbx")
       ?.addEventListener("click", () =>
         window.dispatchEvent(new CustomEvent("agrivision:connect-dropbox"))
+      );
+    hint
+      .querySelector(".hint-reconnect-gdr")
+      ?.addEventListener("click", () =>
+        window.dispatchEvent(new CustomEvent("agrivision:connect-gdrive"))
       );
     hint.querySelector(".hint-restore")?.addEventListener("click", async (e) => {
       const b = e.target;

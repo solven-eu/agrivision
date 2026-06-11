@@ -9,6 +9,7 @@
 import { WORKER_URL, STRIPE_PUBLISHABLE_KEY } from "./config.js";
 import { PLAN_FEATURES, hasFeature } from "./plan-features.js";
 import { safeSetItem } from "./storage-health.js";
+import { toast } from "./toast.js";
 
 // Re-exported so other modules don't need to import plan-features directly.
 export { hasFeature, PLAN_FEATURES };
@@ -27,19 +28,24 @@ export function handleAiAccessError(j) {
     localStorage.removeItem("agri_session_exp");
     const idTok = localStorage.getItem("dbx_id_token");
     if (idTok) {
-      // Async re-trade. Don't block — the user just re-clicks and the new session is
-      // already in place. We surface a short notice so the click→error→retry feels
-      // explained rather than mysterious.
-      alert("Session AgriVision rafraîchie. Re-clique pour relancer l'action.");
+      // Async re-trade. Don't block — the user just re-clicks and the new session is already in
+      // place. A short non-blocking toast explains the click→error→retry.
+      toast("Session AgriVision rafraîchie. Re-clique pour relancer l'action.", { kind: "info", id: "ai" });
       import("./share.js").then(({ tradeDropboxIdTokenForSession }) => {
         import("./config.js").then(({ DROPBOX_APP_KEY }) => {
           tradeDropboxIdTokenForSession(idTok, DROPBOX_APP_KEY).catch(() => {});
         });
       });
     } else {
-      const menu = document.getElementById("app-menu-panel");
-      if (menu) menu.style.display = "block";
-      alert(j?.message || "Reconnecte-toi à Dropbox pour réactiver l'IA.");
+      window.dispatchEvent(
+        new CustomEvent("agrivision:plan-blocked", {
+          detail: {
+            feature: "ai",
+            requiresLogin: true,
+            message: j?.message || "Connecte-toi pour réactiver l'IA.",
+          },
+        })
+      );
     }
     return true;
   }
@@ -49,14 +55,18 @@ export function handleAiAccessError(j) {
     e === "tokens_in_quota_exceeded" ||
     e === "tokens_out_quota_exceeded"
   ) {
-    const menu = document.getElementById("app-menu-panel");
-    if (menu) menu.style.display = "block";
     const msg =
       j?.message ||
       (e === "tokens_in_quota_exceeded" || e === "tokens_out_quota_exceeded"
         ? "Quota de tokens IA atteint pour ce mois. Passe à un plan supérieur ou attends la prochaine période."
         : "Cette fonctionnalité requiert un plan payant.");
-    alert(msg);
+    // Gentle + actionable: a gate TOAST (with "Améliorer mon plan" / "Se connecter"), not a
+    // blocking alert and not an unbidden modal. Uploading a photo shouldn't slam a dialog.
+    window.dispatchEvent(
+      new CustomEvent("agrivision:plan-blocked", {
+        detail: { feature: "ai", requiresLogin: e === "ai_requires_signin", message: msg },
+      })
+    );
     return true;
   }
   return false;
@@ -157,12 +167,12 @@ function authHeader() {
 // the boot-time handler picks it up.
 export async function startCheckout(lookupKey) {
   if (!WORKER_URL) {
-    alert("WORKER_URL non configuré — impossible d'initier le paiement.");
+    toast("WORKER_URL non configuré — impossible d'initier le paiement.");
     return;
   }
   const auth = authHeader();
   if (!auth) {
-    alert("Connecte-toi avec Dropbox avant de passer à un plan payant.");
+    toast("Connecte-toi avec Dropbox avant de passer à un plan payant.");
     return;
   }
   try {
@@ -177,12 +187,12 @@ export async function startCheckout(lookupKey) {
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.checkout_url) {
-      alert("Erreur Stripe : " + (j.error || `HTTP ${r.status}`));
+      toast("Erreur Stripe : " + (j.error || `HTTP ${r.status}`));
       return;
     }
     window.location.href = j.checkout_url;
   } catch (e) {
-    alert("Erreur réseau : " + e.message);
+    toast("Erreur réseau : " + e.message);
   }
 }
 
@@ -199,12 +209,12 @@ export async function openPortal() {
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.portal_url) {
-      alert("Portail indisponible : " + (j.error || `HTTP ${r.status}`));
+      toast("Portail indisponible : " + (j.error || `HTTP ${r.status}`));
       return;
     }
     window.location.href = j.portal_url;
   } catch (e) {
-    alert("Erreur réseau : " + e.message);
+    toast("Erreur réseau : " + e.message);
   }
 }
 
@@ -217,10 +227,10 @@ export function handleBillingReturn(onSuccess) {
   if (status === "success") {
     // Webhook delivery is usually <2s but can lag; let the user see a confirmation
     // and refetch the quota after a short delay so the new tier appears in the UI.
-    alert("Paiement enregistré ✓ — mise à jour de ton plan en cours.");
+    toast("Paiement enregistré ✓ — mise à jour de ton plan en cours.");
     setTimeout(() => onSuccess?.(), 1500);
   } else if (status === "cancel") {
-    alert("Paiement annulé.");
+    toast("Paiement annulé.");
   }
   params.delete("billing");
   params.delete("plan");
@@ -255,7 +265,7 @@ async function createEmbeddedSession(lookupKey) {
   if (!WORKER_URL) return null;
   const auth = authHeader();
   if (!auth) {
-    alert("Connecte-toi avec Dropbox avant de passer à un plan payant.");
+    toast("Connecte-toi avec Dropbox avant de passer à un plan payant.");
     return null;
   }
   try {
@@ -422,7 +432,7 @@ export function renderPlansCard(hostId, currentTier) {
       const live = livePrices?.[p.lookup_key];
       const display = live ? formatStripePrice(live) : p.price_display;
       return `
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border:1px solid var(--border);border-radius:4px;margin-top:4px;background:${isCurrent ? "rgba(74,222,128,0.08)" : "var(--panel2)"}">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border:1px solid var(--border);border-radius:4px;margin-top:4px;background:${isCurrent ? "var(--moss-50)" : "var(--panel2)"}">
           <div>
             <div style="font-weight:600">${p.label}${p.badge ? ` <span style="font-size:9px;color:var(--accent)">· ${p.badge}</span>` : ""}</div>
             <div class="small" style="color:var(--muted)">${display}</div>
@@ -434,11 +444,23 @@ export function renderPlansCard(hostId, currentTier) {
           }
         </div>`;
     }).join("");
+    const tierLabel = { free: "Free Forever", standard: "Standard", premium: "Premium" }[currentTier || "free"] || "Free Forever";
+    const isPaid = currentTier && currentTier !== "free";
+    const sponsor = window.__lastPlanSponsor; // { id, label, tier } when an org finances this plan
     host.innerHTML = `
-      <div class="small" style="color:var(--muted);margin-bottom:4px">Plan actuel : <b>${currentTier || "free"}</b></div>
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;background:var(--moss-50);border:1px solid var(--border);margin-bottom:8px">
+        <span style="font-size:18px;line-height:1">${sponsor ? "🏛️" : isPaid ? "⭐" : "🌱"}</span>
+        <div>
+          <div class="small" style="color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-size:10px">Plan actuel</div>
+          <div style="font-weight:700;color:var(--moss-800)">${tierLabel}</div>
+          ${sponsor ? `<div class="small" style="color:var(--moss-600)">Financé par ${sponsor.label}</div>` : ""}
+        </div>
+      </div>
       ${rows}
       ${
-        currentTier && currentTier !== "free"
+        // Only offer the Stripe portal when there's an actual PURCHASE to manage — an org-inherited
+        // tier (e.g. Early Birds) has no Stripe subscription, so the portal would just error.
+        (window.__lastOwnTier || "free") !== "free"
           ? `<button id="open-portal-btn" class="secondary" style="font-size:11px;padding:4px 8px;margin-top:6px;width:100%">Gérer mon abonnement (Stripe)</button>`
           : ""
       }
