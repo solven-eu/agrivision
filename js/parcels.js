@@ -12,12 +12,31 @@ import { fetchAltitude, exposureHintFromAltitude } from "./elevation.js";
 import { scoreSuitability, colorForScore, evaluateParcel, scoreAllCrops } from "./culture-fit.js";
 import { PLAN_FEATURES } from "./plan-features.js";
 
-// Client-side parcel cap. Read from the shared plan-features config; default to Free's
-// limit when no tier is known yet (boot, anonymous, etc.). The Worker is NOT involved
+// Client-side parcel cap. Read from the shared plan-features config. The Worker is NOT involved
 // in parcel storage — this is purely a UX gate that points the user at the upgrade path.
 function maxParcelsForCurrentPlan() {
-  const tier = window.__lastPlanTier || "free";
-  return PLAN_FEATURES[tier]?.parcels?.max_count ?? PLAN_FEATURES.free.parcels.max_count;
+  const tier = window.__lastPlanTier;
+  if (tier) return PLAN_FEATURES[tier]?.parcels?.max_count ?? PLAN_FEATURES.free.parcels.max_count;
+  // Tier not resolved yet: a logged-in user's quota (incl. org-inherited Standard/Premium) is
+  // fetched asynchronously at boot. Applying Free's cap of 1 here falsely blocks a returning user
+  // who reloaded with parcels restored from a higher-tier session (the "4/1" bug). Be optimistic
+  // while a session exists and the fetch is pending; a truly anonymous user gets Free.
+  const hasSession = !!localStorage.getItem("agri_session");
+  return hasSession ? Infinity : PLAN_FEATURES.free.parcels.max_count;
+}
+
+// Slider switch markup for the lock toggle (🔓 left ↔ 🔒 right, knob slides to the active side).
+// `id` lets the side-panel instance keep its #lock-parcels hook; the on-map instance omits it.
+function lockSwitchHtml(locked, id) {
+  const label = locked ? "Déverrouiller les parcelles" : "Verrouiller les parcelles";
+  return (
+    `<button class="lock-switch"${id ? ` id="${id}"` : ""} type="button" role="switch" ` +
+    `aria-checked="${locked}" aria-label="${label}" title="${label}">` +
+    `<span class="lock-switch-icon left">🔓</span>` +
+    `<span class="lock-switch-icon right">🔒</span>` +
+    `<span class="lock-switch-knob"></span>` +
+    `</button>`
+  );
 }
 
 // Static slider for a single soil parameter showing the optimum band, the optimum point,
@@ -184,11 +203,15 @@ export function installParcels(app) {
         renderParcelInfoPanel();
         const sec = document.getElementById("parcels-section");
         if (sec && !sec.open) sec.open = true;
+        // Open the detail sheet only when the click toggled the parcel IN; a toggle-out click
+        // closes it instead of (re)opening it.
         if (activeParcelIds.has(hitId)) {
           const row = parcelInfoEl.querySelector(`.parcel-row[data-parcel-id="${hitId}"]`);
           row?.scrollIntoView({ behavior: "smooth", block: "center" });
+          openParcelDetail(hitId); // inspect mode: show the parcel's detail sheet
+        } else if (sheetParcelId === hitId) {
+          closeParcelDetail();
         }
-        openParcelDetail(hitId); // inspect mode: show the parcel's detail sheet
       }
       // Blink LAST — after the renders above, which call updateLockHint() and rewrite the badge's
       // className (that was silently wiping the "flash" class before, so it never animated).
@@ -297,9 +320,11 @@ export function installParcels(app) {
       // re-renders don't reach this code path, so reloads keep everything folded.
       const sec = document.getElementById("parcels-section");
       if (sec && app.selectedParcels.size > 0 && !sec.open) sec.open = true;
-      // Open the detail sheet for a just-selected parcel; close it if this click deselected it.
-      if (app.selectedParcels.has(id)) openParcelDetail(id);
-      else if (sheetParcelId === id) closeParcelDetail();
+      // Don't auto-open the detail sheet while building the selection (unlocked) — it popped
+      // over the map on every added parcel and got in the way of selecting the next one.
+      // Inspection happens once parcels are locked (see the locked branch above). Just close
+      // the sheet if this click deselected the parcel it was showing.
+      if (!app.selectedParcels.has(id) && sheetParcelId === id) closeParcelDetail();
     } catch (err) {
       parcelInfoEl.innerHTML = `<dt>Erreur</dt><dd>${err.message}</dd>`;
       parcelInfoEl.style.display = "block";
@@ -519,9 +544,9 @@ export function installParcels(app) {
         <option value="conventional"${bioMode === "conventional" ? " selected" : ""}>Conventionnel</option>
       </select>
     </div>`;
-    html += `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+    html += `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
       <button class="secondary" id="fit-parcels" style="font-size:11px;padding:4px 8px">🎯 Cadrer</button>
-      <button class="secondary" id="lock-parcels" style="font-size:11px;padding:4px 8px">${parcelsLocked ? "🔓 Déverrouiller" : "🔒 Verrouiller"}</button>
+      <span class="lock-switch-group" title="${parcelsLocked ? "Déverrouiller les parcelles" : "Verrouiller les parcelles"}">${parcelsLocked ? "🔒 Verrouillées" : "🔓 Déverrouillées"}${lockSwitchHtml(parcelsLocked, "lock-parcels")}</span>
       <button class="secondary" id="clear-parcels" style="font-size:11px;padding:4px 8px" ${parcelsLocked ? "disabled" : ""}>Tout désélectionner</button>
     </div>`;
     // Soil card — pulled from the first selected parcel's cached soil lookup.
@@ -658,18 +683,19 @@ export function installParcels(app) {
     }
     el.style.display = "flex";
     const parcelsLocked = app.getParcelsLocked();
-    // Explicit toggle BUTTON (the whole-badge click was undiscoverable). The text is informational;
-    // the button is the action.
-    el.innerHTML = parcelsLocked
-      ? `<span>🔒 Verrouillées</span><button class="lock-toggle-btn" type="button">🔓 Déverrouiller</button>`
-      : `<span>🔓 Déverrouillées</span><button class="lock-toggle-btn" type="button">🔒 Verrouiller</button>`;
+    // Status text + a slider switch (🔓 left ↔ 🔒 right). The knob slides toward the lock side when
+    // locking / the unlock side when unlocking; the end icons stay put so the travel direction
+    // reads as the action.
+    el.innerHTML =
+      `<span>${parcelsLocked ? "🔒 Verrouillées" : "🔓 Déverrouillées"}</span>` +
+      lockSwitchHtml(parcelsLocked);
     // Use classList (NOT el.className=) so we don't clobber Leaflet's `.leaflet-control` class —
     // that class is what gives the control pointer-events:auto. Overwriting className removed it,
     // leaving the badge + its button non-clickable (the corner container is pointer-events:none).
     el.classList.add("lock-hint");
     el.classList.toggle("locked", parcelsLocked);
     el.classList.toggle("unlocked", !parcelsLocked);
-    const tbtn = el.querySelector(".lock-toggle-btn");
+    const tbtn = el.querySelector(".lock-switch");
     if (tbtn) {
       // disableClickPropagation isolates the button from Leaflet's map click (no blink/WFS leak).
       // The handler is a plain .onclick (reliably fires, no listener accumulation across re-renders).
@@ -679,7 +705,6 @@ export function installParcels(app) {
         ev.preventDefault();
         ev.stopPropagation();
         const next = !app.getParcelsLocked();
-        console.log("[lock] toggle button clicked → locked =", next);
         app.setParcelsLocked(next);
         renderParcelInfoPanel();
         renderParcelHighlight(); // filled ↔ glow styling on lock change

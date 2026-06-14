@@ -7,9 +7,10 @@
 // chips never actually hid anything. Real per-crop filtering would require rendering parcels as
 // client-side vector polygons from WFS geometry (see ROADMAP); until then there is no filter UI.
 //
-// This module now owns only the two WMS overlays (RPG + cadastre) and the Leaflet layer control.
+// This module now owns only the RPG WMS overlay (always on; the RPG/cadastre layer control is
+// hidden for now — see below).
 
-import { IGN_WMS, RPG_LAYER, CADASTRE_LAYER } from "./config.js";
+import { IGN_WMS, RPG_LAYER } from "./config.js";
 
 /**
  * @param {object} app - { map (Leaflet), getPendingRestore (fn) → boolean }
@@ -28,40 +29,31 @@ export function installChips(app) {
       version: "1.3.0",
       attribution: "RPG © IGN",
       opacity: 0.65,
+      // Above the OSM basemap (z-index 1, set in main.js initBasemap), below satellite imagery
+      // (250) and parcel highlights. The basemap is installed late/deferred, so without this the
+      // two share the default z-index and the basemap can cover RPG — parcels flash then vanish.
+      zIndex: 100,
     });
   }
 
   // Ensure the RPG layer exists and is on the map. Called at boot and again after a Dropbox
   // restore (the initial render is deferred in that case — see below). Idempotent: if the layer
-  // already exists it does nothing, so a user who unchecked RPG in the layer control keeps it off.
+  // already exists it does nothing.
   function refreshRpgLayer() {
     if (rpgLayer) return;
     rpgLayer = buildRpgLayer().addTo(app.map);
-    if (layerCtl) layerCtl.addOverlay(rpgLayer, "RPG (parcelles agricoles)");
   }
 
-  // Cadastre overlay (all parcels, agricultural or not).
-  const cadastreLayer = L.tileLayer.wms(IGN_WMS, {
-    layers: CADASTRE_LAYER,
-    format: "image/png",
-    transparent: true,
-    version: "1.3.0",
-    attribution: "Cadastre © DGFiP/IGN",
-    opacity: 0.55,
-  });
+  // The RPG/cadastre layer control is hidden for now: RPG is always on, and the cadastre overlay
+  // (config.js CADASTRE_LAYER, all parcels agricultural or not) wasn't pulling its weight as a
+  // toggle. To re-expose it, rebuild the cadastre L.tileLayer.wms + L.control.layers here (see
+  // git history).
 
   // Initial RPG render — deferred when a Dropbox restore is imminent (the layer would be re-added
   // anyway once loadSession → refreshRpgLayer runs for the restored parcels' view).
   if (!app.getPendingRestore()) {
     rpgLayer = buildRpgLayer().addTo(app.map);
   }
-
-  // Layer control: the cadastre is registered initially; the RPG layer registers itself when built
-  // (either now or lazily after a Dropbox restore completes).
-  const layerCtl = L.control
-    .layers(null, { "Cadastre (toutes parcelles)": cadastreLayer }, { collapsed: false })
-    .addTo(app.map);
-  if (rpgLayer) layerCtl.addOverlay(rpgLayer, "RPG (parcelles agricoles)");
 
   return { refreshChips: refreshRpgLayer, refreshRpgLayer };
 }

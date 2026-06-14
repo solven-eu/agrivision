@@ -12,7 +12,6 @@ import {
   IGN_WFS,
   RPG_LAYER,
   RPG_WFS_TYPE,
-  CADASTRE_LAYER,
   BAN,
   DEFAULT_VIEW,
   RPG_CATEGORIES,
@@ -159,6 +158,11 @@ function initBasemap() {
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
     attribution: "© OpenStreetMap",
+    // Pin the basemap to the bottom. The basemap is installed LATE (deferred to avoid the boot
+    // tile cascade), so without an explicit z-index it shares the RPG layer's default (1) and,
+    // being added after RPG in some paths, lands ON TOP — hiding the parcels (they flash then
+    // vanish). RPG sets a higher z-index (see chips.js); the basemap stays underneath.
+    zIndex: 1,
   }).addTo(map);
 }
 // Basemap install is now ALWAYS deferred to avoid the boot-time tile cascade:
@@ -676,11 +680,13 @@ if (drawerHandle && sideEl) {
   // Initialize to peek on first load (mobile only — desktop ignores the classes).
   if (window.matchMedia("(max-width: 768px)").matches) setDrawerSnap("peek");
 
-  // Tap: cycle through snap points.
+  // Tap cycle: a closed (peek) drawer opens straight to FULL — the common intent is "show me
+  // everything", not a half-step. From there each tap steps down: full → half → peek. (This is a
+  // dedicated cycle, separate from the openness-ordered swipe handling below.)
+  const tapNext = { peek: "full", full: "half", half: "peek" };
   drawerHandle.addEventListener("click", () => {
     const current = drawerSnaps.find((s) => sideEl.classList.contains(s)) || "peek";
-    const next = drawerSnaps[(drawerSnaps.indexOf(current) + 1) % drawerSnaps.length];
-    setDrawerSnap(next);
+    setDrawerSnap(tapNext[current] || "full");
   });
 
   // Swipe: drag the handle to switch snap.
@@ -971,6 +977,11 @@ const share = createShare({
   getAnalysisCombined: () => analysisCombined,
 });
 window.share = share; // expose for debugging
+// Boot-time quota fetch for a RETURNING user (persisted session, no fresh `agrivision:login`
+// this load). Without it `window.__lastPlanTier` stays unset → it defaults to "free" and the
+// parcel cap (maxParcelsForCurrentPlan) wrongly blocks an org-inherited Standard/Premium user at
+// 1 parcel until they happen to open the menu/plans modal. fetchQuota() no-ops without a session.
+share.fetchQuota();
 
 // ============ Login UI (identity providers: Google / Facebook / Dropbox) ============
 import { createAuth } from "./auth.js";

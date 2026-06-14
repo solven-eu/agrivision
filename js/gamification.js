@@ -103,7 +103,9 @@ export function createGamification(app) {
     // without them the AI can't situate the observation on a parcel or reason about timing.
     const wellTagged = photos.filter((p) => p.lat != null && p.lon != null && p.takenAt).length;
     const untagged = photos.length - wellTagged;
-    const tagRatio = photos.length ? wellTagged / photos.length : 1;
+    // No photos → 0, not 1: an empty dossier hasn't earned this item. A "100% tagged" credit with
+    // zero photos wrongly floored the overall score at ~10% on a brand-new dossier.
+    const tagRatio = photos.length ? wellTagged / photos.length : 0;
     // Report precisely what's missing (a placed-but-undated photo has GPS — don't claim otherwise).
     const noGps = photos.filter((p) => p.lat == null || p.lon == null).length;
     const noDate = photos.filter((p) => !p.takenAt).length;

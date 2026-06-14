@@ -71,6 +71,69 @@ body {
   filter: brightness(1.08);
 }
 
+/* Pulsing "you are here" GPS marker (divIcon). A solid green dot with an expanding ring so it's
+   easy to spot on the map, including outdoors on a phone. */
+.gps-marker {
+  position: relative;
+}
+.gps-marker .gps-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  background: #4ade80;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
+}
+.gps-marker .gps-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  background: rgba(74, 222, 128, 0.45);
+  animation: gps-pulse 1.8s ease-out infinite;
+}
+@keyframes gps-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(3.4);
+    opacity: 0;
+  }
+}
+
+/* On-map "Me localiser" button — sits top-right, in the Recadrer / Aérien cluster. */
+.map-locate-btn {
+  display: block;
+  width: 34px;
+  height: 34px;
+  margin-bottom: 8px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+.map-locate-btn:hover {
+  filter: brightness(1.15);
+}
+.map-locate-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
 /* On-map "Aérien" (Ortho IGN) toggle — sits top-right next to Recadrer. Off = subtle, On = green. */
 .map-ortho-btn {
   display: block;
@@ -109,7 +172,9 @@ body {
   border-radius: 10px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   padding: 14px;
-  z-index: 900;
+  /* Above Leaflet controls (~1000): the top-right cluster (compass/recadrer/ortho) was covering
+     the sheet's close button, making it very hard to dismiss. */
+  z-index: 1100;
   transform: translate(120%, -50%);
   opacity: 0;
   pointer-events: none;
@@ -591,9 +656,11 @@ a {
   height: 70px;
   border-radius: 50%;
   background: rgba(15, 20, 25, 0.85);
-  border: 1px solid var(--border);
+  border: 1px solid rgba(255, 255, 255, 0.18);
   position: relative;
-  color: var(--text);
+  /* The disc is intentionally dark (a night-sky backdrop for ☀/🌙); its text must be LIGHT, not
+     the theme's near-black --text/--muted (light theme) — otherwise it's dark-on-dark + unreadable. */
+  color: #eef2e9;
   font-size: 11px;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
 }
@@ -601,7 +668,7 @@ a {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
-  color: var(--muted);
+  color: rgba(238, 242, 233, 0.72);
   font-weight: 600;
   font-size: 9px;
 }
@@ -639,17 +706,17 @@ a {
   text-shadow: 0 0 4px rgba(180, 200, 230, 0.6);
 }
 .sun-compass .below {
-  opacity: 0.35;
-  filter: grayscale(0.6);
+  opacity: 0.5;
+  filter: grayscale(0.5);
 }
 .sun-meta {
   margin-top: 4px;
   font-size: 10px;
-  color: var(--text);
+  color: #eef2e9; /* light text on the dark meta chip (see .sun-compass note) */
   background: rgba(15, 20, 25, 0.85);
   padding: 2px 6px;
   border-radius: 4px;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(255, 255, 255, 0.18);
   text-align: center;
 }
 .photo-card {
@@ -795,24 +862,71 @@ a {
     border-color 0.15s,
     transform 0.15s;
 }
-.lock-hint .lock-toggle-btn {
+/* Lock slider switch — 🔓 (left) ↔ 🔒 (right); the knob slides to the active side. Used both on
+   the map (lock-hint) and in the side panel (#lock-parcels). The end icons stay put; only the
+   knob moves, so the direction of travel reads as lock (→) / unlock (←). */
+.lock-switch {
+  position: relative;
   flex: none;
-  background: var(--accent);
-  color: var(--on-accent);
-  border: none;
-  border-radius: 5px;
-  font-size: 11px;
-  font-weight: 700;
-  padding: 4px 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 58px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   cursor: pointer;
-  white-space: nowrap;
+  user-select: none;
+  transition:
+    background 0.18s,
+    border-color 0.18s;
 }
-.lock-hint.locked .lock-toggle-btn {
+.lock-switch[aria-checked="true"] {
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+}
+.lock-switch-icon {
+  font-size: 12px;
+  line-height: 1;
+  z-index: 1;
+  pointer-events: none;
+  transition: opacity 0.18s;
+}
+.lock-switch[aria-checked="false"] .lock-switch-icon.right {
+  opacity: 0.35;
+}
+.lock-switch[aria-checked="true"] .lock-switch-icon.left {
+  opacity: 0.35;
+}
+.lock-switch-knob {
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  transform: translateY(-50%);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition:
+    left 0.18s ease,
+    background 0.18s;
+}
+.lock-switch[aria-checked="true"] .lock-switch-knob {
+  left: calc(100% - 22px);
   background: var(--warn);
-  color: var(--ink);
 }
-.lock-hint .lock-toggle-btn:hover {
+.lock-switch:hover {
   filter: brightness(1.06);
+}
+/* Side-panel lock group: a small "Parcelles" label next to the slider. */
+.lock-switch-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
 }
 .lock-hint.locked {
   border-color: var(--warn);
@@ -855,6 +969,16 @@ a {
   animation: pulse-hint 1.8s ease-in-out infinite;
   cursor: default;
   user-select: none;
+  /* Purely informational → never intercept taps. Combined with the topleft-corner z-index lift
+     below, the hint reads ON TOP of the topright "Aérien" button (which otherwise covers it on a
+     narrow phone) while taps still pass through to whatever sits underneath. */
+  pointer-events: none;
+}
+/* Lift the topleft control corner (which hosts the select-hint) above the topright corner, so the
+   "Cliquez une parcelle" call-to-action is never hidden behind the 🛰️ Aérien button where they
+   overlap on small screens. */
+.leaflet-top.leaflet-left {
+  z-index: 1001;
 }
 @keyframes pulse-hint {
   0%,
