@@ -25,6 +25,14 @@ function maxParcelsForCurrentPlan() {
   return hasSession ? Infinity : PLAN_FEATURES.free.parcels.max_count;
 }
 
+// Escape user-provided text (parcel names) before interpolating into innerHTML.
+function escapeHtml(s) {
+  return String(s).replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+  );
+}
+
 // Slider switch markup for the lock toggle (🔓 left ↔ 🔒 right, knob slides to the active side).
 // `id` lets the side-panel instance keep its #lock-parcels hook; the on-map instance omits it.
 function lockSwitchHtml(locked, id) {
@@ -530,8 +538,13 @@ export function installParcels(app) {
       const activeBg = isActive
         ? "background:rgba(251,191,36,0.18);border-left:3px solid var(--warn);padding-left:6px"
         : "";
+      // User-given name (optional) shown ahead of the crop label; rename + remove affordances.
+      const nameLabel = p.name ? `<b>${escapeHtml(p.name)}</b> · ` : "";
+      const rowBtns =
+        `<button class="parcel-remove" data-pid="${pid}" title="Retirer cette parcelle de la sélection" style="font-size:11px;padding:1px 6px;float:right;margin-left:4px">✕</button>` +
+        `<button class="secondary parcel-rename" data-pid="${pid}" title="Nommer cette parcelle" style="font-size:10px;padding:1px 6px;float:right;margin-left:4px">✏️</button>`;
       html += `<dd class="parcel-row" data-parcel-id="${pid}" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);cursor:pointer;${activeBg}">
-        ${expandBtn}<b>P${idx}.</b> ${emoji} ${label} <span class="small" style="color:var(--muted)">(${code})</span>${bio} · <b>${area} ha</b>${altChip}${photoChip}
+        ${rowBtns}${expandBtn}<b>P${idx}.</b> ${nameLabel}${emoji} ${label} <span class="small" style="color:var(--muted)">(${code})</span>${bio} · <b>${area} ha</b>${altChip}${photoChip}
         <div style="margin-top:2px">${detail}</div>
         <div id="${detailId}" style="display:none">${hasSoil ? renderParcelBreakdown(p, idx, resolveIdentifiedCropMeta(app.getAnalysisCombined?.()?.identification)) : ""}</div>
       </dd>`;
@@ -544,10 +557,11 @@ export function installParcels(app) {
         <option value="conventional"${bioMode === "conventional" ? " selected" : ""}>Conventionnel</option>
       </select>
     </div>`;
+    const hasActive = activeParcelIds.size > 0;
     html += `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
       <button class="secondary" id="fit-parcels" style="font-size:11px;padding:4px 8px">🎯 Cadrer</button>
       <span class="lock-switch-group" title="${parcelsLocked ? "Déverrouiller les parcelles" : "Verrouiller les parcelles"}">${parcelsLocked ? "🔒 Verrouillées" : "🔓 Déverrouillées"}${lockSwitchHtml(parcelsLocked, "lock-parcels")}</span>
-      <button class="secondary" id="clear-parcels" style="font-size:11px;padding:4px 8px" ${parcelsLocked ? "disabled" : ""}>Tout désélectionner</button>
+      <button class="secondary" id="clear-parcels" style="font-size:11px;padding:4px 8px" title="Retire la surbrillance des parcelles mises en avant — les parcelles restent sélectionnées et sauvegardées" ${hasActive ? "" : "disabled"}>Tout désélectionner</button>
     </div>`;
     // Soil card — pulled from the first selected parcel's cached soil lookup.
     // Renders nothing while the fetch is in flight; appears when fetchSoilAt resolves
@@ -567,13 +581,12 @@ export function installParcels(app) {
           : "Parcelles sélectionnées";
     }
     document.getElementById("clear-parcels").onclick = () => {
-      if (app.getParcelsLocked()) return;
-      app.selectedParcels.clear();
-      closeParcelDetail();
+      // Clear only the HIGHLIGHT (active subset) — never drop parcels from the saved selection.
+      // Works in lock mode too (that's where highlighting parcels is the main interaction).
+      if (activeParcelIds.size === 0) return;
+      activeParcelIds.clear();
       renderParcelHighlight();
       renderParcelInfoPanel();
-      updateLockHint();
-      updateSelectHint();
     };
     document.getElementById("lock-parcels").onclick = () => {
       const next = !app.getParcelsLocked();
@@ -629,6 +642,39 @@ export function installParcels(app) {
         if (!wasActive && parcel?.latlng) {
           app.map.setView(parcel.latlng, Math.max(app.map.getZoom(), 16), { animate: true });
         }
+      };
+    });
+    // ✕ Remove a single parcel from the selection. Works regardless of lock state — it's the
+    // escape hatch for a parcel selected twice (duplicate) or added by mistake. Re-rendering the
+    // panel trips the #parcel-info MutationObserver in main.js, which persists the removal.
+    parcelInfoEl.querySelectorAll(".parcel-remove").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const pid = btn.dataset.pid;
+        if (!app.selectedParcels.has(pid)) return;
+        app.selectedParcels.delete(pid);
+        activeParcelIds.delete(pid);
+        if (sheetParcelId === pid) closeParcelDetail();
+        refreshPhotoAssociations();
+        renderParcelHighlight();
+        renderParcelInfoPanel();
+        app.renderPhotos?.();
+        updateLockHint();
+        updateSelectHint();
+      };
+    });
+    // ✏️ Name a parcel (free text; cleared by emptying). Persisted via the same observer path.
+    parcelInfoEl.querySelectorAll(".parcel-rename").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const pid = btn.dataset.pid;
+        const p = app.selectedParcels.get(pid);
+        if (!p) return;
+        const next = window.prompt("Nom de la parcelle (laisser vide pour retirer le nom) :", p.name || "");
+        if (next === null) return; // cancelled
+        p.name = next.trim() || null;
+        renderParcelInfoPanel();
+        if (sheetParcelId === pid) renderParcelSheet();
       };
     });
   }
@@ -790,7 +836,6 @@ export function installParcels(app) {
     const fit = scoreSuitability(p.soil, p.props?.code_cultu);
     const altTxt = p.altitude != null ? `${p.altitude} m · ${exposureHintFromAltitude(p.altitude)}` : null;
     const photoCount = (app.photos || []).filter((ph) => ph.associatedParcelId === id).length;
-    const locked = app.getParcelsLocked?.();
     const ndviColor = (m) => (m >= 0.6 ? "var(--accent)" : m >= 0.3 ? "var(--warn)" : "var(--bad)");
     const ndviRow =
       p.ndvi?.mean != null
@@ -807,9 +852,13 @@ export function installParcels(app) {
         : "pas de pluie prévue";
       weatherRow = `<div class="psheet-row"><span>💧 Eau</span><span style="max-width:62%">${rain}${sm ? ` · ${sm}` : ""}</span></div>`;
     }
+    const activeCount = activeParcelIds.size;
+    const discussLabel =
+      activeCount > 1 ? `💬 Discuter de ces ${activeCount} parcelles` : "💬 Discuter de cette parcelle";
+    const titleName = p.name ? `${escapeHtml(p.name)} — ` : "";
     el.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
-        <div style="font-weight:700;font-size:14px">${meta.emoji || "🌱"} ${meta.fr || p.props?.code_cultu || "Parcelle"}</div>
+        <div style="font-weight:700;font-size:14px">${meta.emoji || "🌱"} ${titleName}${meta.fr || p.props?.code_cultu || "Parcelle"}</div>
         <button id="psheet-close" aria-label="Fermer" style="background:none;border:0;color:var(--muted);font-size:18px;cursor:pointer;line-height:1">✕</button>
       </div>
       <div class="small" style="color:var(--muted);margin-bottom:8px">code ${p.props?.code_cultu || "?"} · ${area} ha${isBio ? " · 🌱 bio" : ""}</div>
@@ -822,8 +871,9 @@ export function installParcels(app) {
         ${weatherRow}
       </div>
       <div style="margin-top:12px;display:flex;flex-direction:column;gap:6px">
-        <button id="psheet-discuss" class="primary-capture" style="font-size:13px;padding:8px">💬 Discuter de cette parcelle</button>
-        ${!locked ? `<button id="psheet-remove" class="secondary" style="font-size:11px;padding:4px 8px">Retirer de la sélection</button>` : ""}
+        <button id="psheet-discuss" class="primary-capture" style="font-size:13px;padding:8px">${discussLabel}</button>
+        <button id="psheet-rename" class="secondary" style="font-size:11px;padding:4px 8px">${p.name ? "✏️ Renommer" : "✏️ Nommer la parcelle"}</button>
+        <button id="psheet-remove" class="secondary" style="font-size:11px;padding:4px 8px">Retirer de la sélection</button>
       </div>`;
     el.querySelector("#psheet-close").onclick = closeParcelDetail;
     el.querySelector("#psheet-discuss").onclick = () => discussParcel(id);
@@ -842,34 +892,60 @@ export function installParcels(app) {
     if (rm)
       rm.onclick = () => {
         app.selectedParcels.delete(id);
+        activeParcelIds.delete(id);
         refreshPhotoAssociations();
         renderParcelHighlight();
         renderParcelInfoPanel();
         app.renderPhotos?.();
+        updateLockHint();
         updateSelectHint();
         closeParcelDetail();
       };
+    const rn = el.querySelector("#psheet-rename");
+    if (rn)
+      rn.onclick = () => {
+        const next = window.prompt("Nom de la parcelle (laisser vide pour retirer le nom) :", p.name || "");
+        if (next === null) return;
+        p.name = next.trim() || null;
+        renderParcelSheet();
+        renderParcelInfoPanel();
+      };
   }
 
-  // Build a parcel-scoped prompt and hand it to the chat (via main.js event listener).
-  function discussParcel(id) {
-    const p = app.selectedParcels.get(id);
-    if (!p) return;
+  // One-line summary of a parcel for a discussion prompt (name, crop, area, soil, altitude, NDVI).
+  function parcelSummary(id, p) {
     const meta = cropMeta(p.props?.code_cultu);
     const area = parcelArea(p.props).toFixed(2);
     const bioMode = app.getBioMode();
     const isBio = bioMode === "bio" || (bioMode === "auto" && p.props?.bio === 1);
     const soilLine = soilSummaryLine(p.soil);
     const photoCount = (app.photos || []).filter((ph) => ph.associatedParcelId === id).length;
-    const bits = [`${meta.fr || p.props?.code_cultu} (${area} ha${isBio ? ", bio" : ""})`];
+    const nm = p.name ? `« ${p.name} » — ` : "";
+    const bits = [`${nm}${meta.fr || p.props?.code_cultu} (${area} ha${isBio ? ", bio" : ""})`];
     if (p.altitude != null) bits.push(`altitude ${p.altitude} m`);
     if (soilLine) bits.push(`sol : ${soilLine}`);
     if (p.ndvi?.mean != null) bits.push(`NDVI ${p.ndvi.mean} (${p.ndvi.label})`);
     bits.push(`${photoCount} photo(s) située(s) dans la parcelle`);
-    const text = `Concentrons-nous sur cette parcelle — ${bits.join(" ; ")}. Donne-moi un diagnostic ciblé (état, risques de maladies, conseils d'intervention) pour CETTE parcelle précisément.`;
-    // Focus the highlight on this parcel.
-    activeParcelIds.clear();
-    activeParcelIds.add(id);
+    return bits.join(" ; ");
+  }
+
+  // Build a parcel-scoped prompt and hand it to the chat (via main.js event listener). Scope: the
+  // highlighted (active) subset when the user has focused several parcels; otherwise just `id`.
+  function discussParcel(id) {
+    const ids = activeParcelIds.size > 1 ? [...activeParcelIds] : [id];
+    const entries = ids.map((i) => [i, app.selectedParcels.get(i)]).filter(([, p]) => p);
+    if (!entries.length) return;
+    let text;
+    if (entries.length === 1) {
+      const [pid, p] = entries[0];
+      text = `Concentrons-nous sur cette parcelle — ${parcelSummary(pid, p)}. Donne-moi un diagnostic ciblé (état, risques de maladies, conseils d'intervention) pour CETTE parcelle précisément.`;
+      // Focus the highlight on this parcel.
+      activeParcelIds.clear();
+      activeParcelIds.add(pid);
+    } else {
+      const lines = entries.map(([pid, p], n) => `P${n + 1}. ${parcelSummary(pid, p)}`);
+      text = `Concentrons-nous sur ces ${entries.length} parcelles :\n${lines.join("\n")}\nDonne-moi un diagnostic ciblé (état, risques de maladies, conseils d'intervention) pour chacune, et signale ce qui les distingue.`;
+    }
     renderParcelHighlight();
     window.dispatchEvent(new CustomEvent("agrivision:discuss-parcel", { detail: { text } }));
     closeParcelDetail();

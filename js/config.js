@@ -6,14 +6,25 @@
 // WORKER_URL empty → falls back to direct browser call using ANTHROPIC_API_KEY below.
 //   Only safe on localhost for testing — key is exposed in the bundle.
 //
-// Environment-aware: localhost dev hits the local `wrangler dev` Worker; everywhere else (the
-// deployed app over HTTPS) MUST hit the deployed Worker — an HTTPS page cannot call http://localhost
-// (mixed content → "Failed to fetch"). Set WORKER_URL_PROD to your deployed Worker URL, printed by
-// `cd worker && npx wrangler deploy` (e.g. https://agrivision-api.<your-subdomain>.workers.dev),
-// or a custom route/domain if you add one.
-const WORKER_URL_DEV = "http://localhost:8787";
+// Environment-aware: local dev hits the local `wrangler dev` Worker; everywhere else (the deployed
+// app over HTTPS) MUST hit the deployed Worker — an HTTPS page cannot call http://… (mixed content
+// → "Failed to fetch"). Set WORKER_URL_PROD to your deployed Worker URL, printed by
+// `cd worker && npx wrangler deploy` (e.g. https://agrivision-api.<your-subdomain>.workers.dev).
+//
+// "Local" = loopback OR a private LAN IP (192.168/x, 10/x, 172.16–31/x) OR an mDNS *.local name —
+// so opening the dev server from a phone on the same network (http://192.168.x.y:8000) still routes
+// AI calls to the dev Worker. The Worker is taken on the SAME host at :8787 (NOT a literal
+// "localhost", which on the phone would mean the phone itself). For LAN access the dev Worker must
+// also listen on the LAN: run wrangler with `--ip 0.0.0.0` (the npm "worker" script binds 127.0.0.1).
+const _host = location.hostname;
+const _isLocalhost =
+  /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|::1)$/.test(_host) ||
+  /^192\.168\.\d{1,3}\.\d{1,3}$/.test(_host) ||
+  /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(_host) ||
+  /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(_host) ||
+  _host.endsWith(".local");
+const WORKER_URL_DEV = `${location.protocol}//${_host}:8787`;
 const WORKER_URL_PROD = "https://agrivision-api.benoit-ef0.workers.dev";
-const _isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/.test(location.hostname);
 export const WORKER_URL = _isLocalhost ? WORKER_URL_DEV : WORKER_URL_PROD;
 export const ANTHROPIC_API_KEY = ""; // only used when WORKER_URL is empty
 export const ANTHROPIC_MODEL = "claude-haiku-4-5";

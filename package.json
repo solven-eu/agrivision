@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "python3 serve-dev.py 8000",
-    "worker": "cd worker && npx wrangler@latest dev --port 8787 --ip 127.0.0.1",
+    "worker": "cd worker && npx wrangler@latest dev --port 8787 --ip 0.0.0.0",
     "format": "prettier --write \"**/*.{js,mjs,json,html,css,md}\"",
     "format:check": "prettier --check \"**/*.{js,mjs,json,html,css,md}\"",
     "test:reload": "node test-with-token.mjs",

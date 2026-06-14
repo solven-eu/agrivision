@@ -671,6 +671,14 @@ function setDrawerSnap(snap) {
   side.classList.remove("open"); // legacy class
   const chev = document.getElementById("drawer-chevron");
   if (chev) chev.textContent = snap === "peek" ? "▲" : snap === "half" ? "◆" : "▼";
+  // When the tools drawer is full-screen (mobile), the map sits behind it — stop it (and its
+  // Leaflet controls) from intercepting taps meant for the drawer. Mobile-only: on desktop the
+  // side panel is a fixed column, never an overlay, so the map must stay interactive.
+  const mapEl = document.getElementById("map");
+  if (mapEl) {
+    const isMobile = window.matchMedia("(max-width: 768px)").matches;
+    mapEl.style.pointerEvents = isMobile && snap === "full" ? "none" : "";
+  }
 }
 window.setDrawerSnap = setDrawerSnap; // for inline use elsewhere if needed
 

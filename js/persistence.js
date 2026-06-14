@@ -611,6 +611,7 @@ export function createDbx(app) {
           props: p.props,
           geometry: p.geometry,
           latlng: p.latlng,
+          name: p.name ?? null, // user-given parcel name (persisted; was dropped on restore)
           // Restore persisted enrichments; the `*Fetched` flags let ensureSoil/ensureAltitude
           // skip them (only missing ones re-fetch). NDVI has no auto-fetch, so this is the
           // only thing that restores it without a CDSE call.
