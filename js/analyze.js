@@ -9,7 +9,7 @@ import { SYSTEM_PROMPT, buildContextBlock } from "./prompts.js";
 import { FULL_REPORT_SCHEMA, DISEASES_SCHEMA, PHOTO_TAG_SCHEMA } from "./schemas.js";
 import { aggregateParcels } from "./state.js";
 import { robustParseJson } from "./util.js";
-import { shareAttribHeaders } from "./share.js";
+import { workerAuthHeader } from "./share.js";
 import { handleAiAccessError } from "./billing.js";
 
 /**
@@ -127,7 +127,7 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
       ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze`
       : "https://api.anthropic.com/v1/messages";
     const headers = useWorker
-      ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...shareAttribHeaders() }
+      ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...workerAuthHeader() }
       : {
           "content-type": "application/json",
           "x-api-key": ANTHROPIC_API_KEY,
@@ -252,7 +252,7 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
       ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze`
       : "https://api.anthropic.com/v1/messages";
     const headers = useWorker
-      ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...shareAttribHeaders() }
+      ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...workerAuthHeader() }
       : {
           "content-type": "application/json",
           "x-api-key": ANTHROPIC_API_KEY,
@@ -342,7 +342,7 @@ Format : UNIQUEMENT le JSON rempli. Pas de markdown.`;
       ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze`
       : "https://api.anthropic.com/v1/messages";
     const headers = useWorker
-      ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...shareAttribHeaders() }
+      ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...workerAuthHeader() }
       : {
           "content-type": "application/json",
           "x-api-key": ANTHROPIC_API_KEY,

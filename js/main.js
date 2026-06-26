@@ -137,6 +137,17 @@ function renderMetrics(m) {
     },
     onGenerateMarket: () => generateField?.("market"),
     onGenerateNotes: () => generateField?.("notes"),
+    // Drives the grid's empty/loading state and its "Lancer l'analyse IA" button. The analysis
+    // runs inline (keepClosed) so the user stays on the grid instead of jumping to Conversation IA.
+    busy: chat?.isChatBusy?.() || false,
+    onLaunchAnalysis: () => {
+      const start = document.getElementById("chat-start");
+      if (start?.disabled) {
+        toast("Ajoute une photo ou sélectionne une parcelle pour lancer l'analyse.");
+        return;
+      }
+      sendTurn(null, { keepClosed: true });
+    },
   });
 }
 

@@ -8,7 +8,7 @@ import { CHAT_SYSTEM_PROMPT, buildContextBlock } from "./prompts.js";
 import { toast } from "./toast.js";
 import { aggregateParcels } from "./state.js";
 import { robustParseJson } from "./util.js";
-import { shareAttribHeaders } from "./share.js";
+import { workerAuthHeader } from "./share.js";
 import { handleAiAccessError } from "./billing.js";
 
 /**
@@ -577,7 +577,7 @@ export function createChat(app) {
   }
 
   // ---------- Turn loop ----------
-  async function sendTurn(userInput) {
+  async function sendTurn(userInput, opts = {}) {
     if (!WORKER_URL && !ANTHROPIC_API_KEY) {
       app.aStatus.textContent = "Configure WORKER_URL ou ANTHROPIC_API_KEY.";
       return;
@@ -585,8 +585,12 @@ export function createChat(app) {
     if (chatBusy) return;
     // User-initiated turn → open the chat section so the user sees the result. NOT
     // called from renderChat, so Dropbox restore doesn't pop the section every reload.
-    const sec = document.getElementById("chat-section");
-    if (sec && !sec.open) sec.open = true;
+    // `keepClosed` skips the jump for callers that surface progress elsewhere (e.g. the
+    // "Lancer l'analyse IA" button in the Grille normalisée runs inline, grid-only).
+    if (!opts.keepClosed) {
+      const sec = document.getElementById("chat-section");
+      if (sec && !sec.open) sec.open = true;
+    }
     if (app.isOverHardLimit?.()) {
       app.aStatus.textContent = "⛔ Limite de tokens atteinte — Recommencer pour continuer.";
       return;
@@ -685,6 +689,9 @@ Mode de conduite : ${bio}`;
     chatBusy = true;
     app.setButtonsDisabled(true);
     renderChat();
+    // Reflect "analyse en cours" in the Grille normalisée so a grid-launched analysis shows
+    // progress in place (rather than only inside the chat log).
+    app.renderMetrics?.(app.getAnalysisCombined());
 
     const apiMessages = app.conversation.map((m, i) => {
       if (m.role === "user" && i === 0) return { role: "user", content: userContent };
@@ -720,7 +727,7 @@ Mode de conduite : ${bio}`;
       ? `${WORKER_URL.replace(/\/$/, "")}/api/analyze`
       : "https://api.anthropic.com/v1/messages";
     const headers = useWorker
-      ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...shareAttribHeaders() }
+      ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...workerAuthHeader() }
       : {
           "content-type": "application/json",
           "x-api-key": ANTHROPIC_API_KEY,
@@ -801,6 +808,9 @@ Mode de conduite : ${bio}`;
       app.setButtonsDisabled(false);
       renderChat();
       app.updateAnalyzeAvailability();
+      // Clear the grid's "analyse en cours" state: fills with results if a metrics_update
+      // arrived, otherwise falls back to the empty-state button (e.g. an error or no metrics).
+      app.renderMetrics?.(app.getAnalysisCombined());
     }
   }
 

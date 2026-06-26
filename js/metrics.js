@@ -114,19 +114,22 @@ export function renderMetrics(m, hooks = {}) {
   if (!m || !m.identification) {
     const box = document.createElement("div");
     box.style.cssText = "grid-column:1/-1;text-align:center;padding:12px 6px;color:var(--muted)";
+    // Analysis in flight (launched from here or the chat) → show progress in place; the cells
+    // fill when the analysis returns, without bouncing the user to the Conversation IA section.
+    if (hooks.busy) {
+      box.innerHTML = `<div class="small">⏳ Analyse en cours… la grille se remplit dès que c'est prêt.</div>`;
+      el.appendChild(box);
+      return;
+    }
     box.innerHTML = `<div class="small" style="margin-bottom:8px">Aucune analyse IA pour l'instant — la grille se remplit après une analyse.</div>`;
     const btn = document.createElement("button");
     btn.style.cssText = "font-size:12px;padding:6px 12px";
     btn.textContent = "🔬 Lancer l'analyse IA";
     btn.onclick = () => {
-      // Open the chat section (where the analysis runs + shows its own status), then start it if
-      // possible. Don't show a misleading "add a photo" toast — the chat section's status line
-      // already says exactly what's missing (and may be blocked by an upstream error, not inputs).
-      const sec = document.getElementById("chat-section");
-      if (sec && !sec.open) sec.open = true;
-      sec?.scrollIntoView({ behavior: "smooth", block: "start" });
-      const start = document.getElementById("chat-start");
-      if (start && !start.disabled) start.click();
+      // Run inline: start the analysis without opening/jumping to the Conversation IA section.
+      // The grid's own "analyse en cours" state (above) is the feedback; the chat section's
+      // status line still reports if inputs are missing or an upstream error blocks it.
+      hooks.onLaunchAnalysis?.();
     };
     box.appendChild(btn);
     el.appendChild(box);

@@ -5,7 +5,7 @@
 // output_tokens } }`) regardless of which provider answered.
 
 import { WORKER_URL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL, MISTRAL_MODEL } from "./config.js";
-import { shareAttribHeaders } from "./share.js";
+import { workerAuthHeader } from "./share.js";
 
 export const PROVIDERS = {
   anthropic: { label: "Claude", defaultModel: ANTHROPIC_MODEL, route: "/api/analyze" },
@@ -30,7 +30,7 @@ export async function ask(providerId, payload) {
     ? `${WORKER_URL.replace(/\/$/, "")}${provider.route}`
     : "https://api.anthropic.com/v1/messages";
   const headers = useWorker
-    ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...shareAttribHeaders() }
+    ? { "content-type": "application/json", "anthropic-version": "2023-06-01", ...workerAuthHeader() }
     : {
         "content-type": "application/json",
         "x-api-key": ANTHROPIC_API_KEY,

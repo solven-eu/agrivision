@@ -17,15 +17,6 @@ const LS = {
   lastSync: "share_last_sync_iso",
 };
 
-// Returns a header object that authenticates the caller to our Worker. Single carrier:
-// `Authorization: Bearer <agri_session>` where agri_session is our HMAC-signed JWT
-// minted by /api/auth/dropbox/login. Returns `{}` when no session is available — the
-// Worker then treats the call as anonymous (no quota tracking).
-export function shareAttribHeaders() {
-  if (localStorage.getItem(LS.enabled) !== "1") return {};
-  return workerAuthHeader();
-}
-
 // Authorization header carrying the AgriVision session JWT, or {} when signed out.
 // Exported so other identified features (satellite, etc.) can authenticate to the Worker.
 export function workerAuthHeader() {
