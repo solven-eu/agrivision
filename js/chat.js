@@ -465,7 +465,10 @@ export function createChat(app) {
     if (chatBusy) {
       const t = document.createElement("div");
       t.className = "chat-typing";
-      t.textContent = "Claude réfléchit…";
+      t.style.display = "flex";
+      t.style.alignItems = "center";
+      t.style.gap = "8px";
+      t.innerHTML = `<span class="spinner sm"></span> Claude réfléchit…`;
       log.appendChild(t);
     }
     log.scrollTop = log.scrollHeight;

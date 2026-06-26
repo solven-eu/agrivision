@@ -425,6 +425,12 @@ export function createDbx(app) {
     try {
       await uploadFile(`${base}/culture.json`, new TextEncoder().encode(JSON.stringify(manifest, null, 2)));
       state.baseHash = manifest.content_hash; // in sync with the remote we just wrote
+      // Keep the picker's summary fresh for this session without a re-download.
+      sessionMeta.set(metaKey(state.cropCode, state.sessionId), {
+        parcels: manifest.parcels.length,
+        photos: manifest.photos.length,
+        saved_at: manifest.saved_at,
+      });
       setSaveStatus("saved");
       renderPanel(
         `✓ ${new Date().toLocaleTimeString("fr-FR")} · ${manifest.parcels.length} parc. · ${manifest.photos.length} ph.`
@@ -1030,6 +1036,31 @@ export function createDbx(app) {
   // for now — too easy to misclick. Restore with ?debug if needed.
   const showDelete = new URLSearchParams(location.search).has("debug");
 
+  // Per-culture summary (parcels / photos / freshness) shown in the picker so the user can tell
+  // saves apart at a glance instead of guessing from the raw id. Cached across re-renders; the
+  // active session's entry is refreshed on every successful save (see saveNow).
+  const sessionMeta = new Map(); // `${crop}|${id}` -> { parcels, photos, saved_at }
+  function metaKey(cc, sid) {
+    return `${cc}|${sid}`;
+  }
+  // Human freshness. Prefer the manifest's saved_at; fall back to the date baked into the id
+  // (genSessionId → "YYYY-MM-DD_HHMM_rand"), so a row stays informative even if its manifest
+  // can't be read.
+  function freshnessLabel(savedAt, id) {
+    let d = savedAt ? new Date(savedAt) : null;
+    if ((!d || isNaN(d)) && id) {
+      const m = String(id).match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})/);
+      if (m) d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+    }
+    if (!d || isNaN(d)) return "date inconnue";
+    return d.toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" });
+  }
+  function metaLine(meta, id) {
+    if (!meta) return "…";
+    const nph = meta.photos || 0;
+    return `🌿 ${meta.parcels || 0} parc. · 📷 ${nph} photo${nph > 1 ? "s" : ""} · 🕒 ${freshnessLabel(meta.saved_at, id)}`;
+  }
+
   async function renderCropsList() {
     const target = document.getElementById("dbx-sessions");
     target.innerHTML = `<div class="small">Recherche…</div>`;
@@ -1051,11 +1082,13 @@ export function createDbx(app) {
         html += `<div style="margin-top:6px;font-weight:600;font-size:11px;color:var(--muted)">${cm.emoji || "🌱"} ${cm.fr || cc}</div>`;
         for (const c of byCrop[cc]) {
           const isCurrent = state.cropCode === cc && state.sessionId === c.id;
+          const cached = sessionMeta.get(metaKey(cc, c.id));
           html += `
             <div style="display:flex;gap:4px;margin-top:2px;align-items:center;padding:3px 6px;border-radius:4px;background:${isCurrent ? "var(--accent)" : "var(--panel2)"};color:${isCurrent ? "#0a0e13" : "var(--text)"}">
               <button class="dbx-sess-switch" data-crop="${cc}" data-id="${c.id}"
                 style="flex:1;font-size:10px;padding:2px 4px;text-align:left;background:transparent;color:inherit;border:none;cursor:pointer">
-                ${isCurrent ? "● " : ""}<code style="font-size:10px;color:inherit">${c.id}</code>
+                <div>${isCurrent ? "● " : ""}<code style="font-size:10px;color:inherit">${c.id}</code></div>
+                <div class="dbx-sess-meta" data-key="${metaKey(cc, c.id)}" style="font-size:9px;opacity:0.85;margin-top:1px">${metaLine(cached, c.id)}</div>
               </button>
               ${
                 showDelete
@@ -1067,6 +1100,29 @@ export function createDbx(app) {
         }
       }
       target.innerHTML = html;
+
+      // Lazily enrich each row with its parcels/photos/freshness by reading culture.json. Runs in
+      // the background so the list shows immediately; a row that fails to load keeps its id-derived
+      // date fallback. Cached so re-renders (after a switch/delete) don't re-download.
+      for (const c of list) {
+        if (sessionMeta.has(metaKey(c.crop, c.id))) continue;
+        downloadFile(`/crops/${c.crop}/cultures/${c.id}/culture.json`)
+          .then((r) => r.json())
+          .then((m) => {
+            const meta = {
+              parcels: m.parcels?.length || 0,
+              photos: m.photos?.length || 0,
+              saved_at: m.saved_at || null,
+            };
+            sessionMeta.set(metaKey(c.crop, c.id), meta);
+            const el = target.querySelector(`.dbx-sess-meta[data-key="${metaKey(c.crop, c.id)}"]`);
+            if (el) el.textContent = metaLine(meta, c.id);
+          })
+          .catch(() => {
+            const el = target.querySelector(`.dbx-sess-meta[data-key="${metaKey(c.crop, c.id)}"]`);
+            if (el) el.textContent = `🕒 ${freshnessLabel(null, c.id)}`;
+          });
+      }
 
       target.querySelectorAll(".dbx-sess-switch").forEach(
         (b) =>

@@ -3,7 +3,7 @@
 // `analysisCombined` (price override) are delegated back via the `onPriceEdit` callback,
 // so this module never touches main.js state directly.
 
-import { formatRelativeDays, fmtEUR } from "./util.js";
+import { formatRelativeDays, fmtEUR, numOr } from "./util.js";
 import { CULTU_LABELS, DISEASE_CATALOG, lookupCropImage, lookupTaxonImage } from "./catalog.js";
 import { toast } from "./toast.js";
 
@@ -79,12 +79,14 @@ function userLaborRateOverride() {
 /** Total per-ha treatment cost = materials + (prep+apply) × labor_rate + equipment. */
 export function treatmentTotalCost(t) {
   const c = t.cost_breakdown || {};
-  const mat = c.materials_eur_per_ha ?? 0;
-  const equip = c.equipment_eur_per_ha ?? 0;
-  const prep = c.prep_time_h_per_ha ?? 0;
-  const apply = c.application_time_h_per_ha ?? 0;
+  // numOr: the model may emit these as strings ("35") — coerce so the arithmetic below stays
+  // numeric (string "+" would concatenate and break every downstream .toFixed).
+  const mat = numOr(c.materials_eur_per_ha, 0);
+  const equip = numOr(c.equipment_eur_per_ha, 0);
+  const prep = numOr(c.prep_time_h_per_ha, 0);
+  const apply = numOr(c.application_time_h_per_ha, 0);
   const override = userLaborRateOverride();
-  const rate = override ?? c.labor_eur_per_h ?? 0;
+  const rate = override ?? numOr(c.labor_eur_per_h, 0);
   const labor = (prep + apply) * rate;
   const method = c.application_method || null;
   return {
@@ -117,7 +119,7 @@ export function renderMetrics(m, hooks = {}) {
     // Analysis in flight (launched from here or the chat) → show progress in place; the cells
     // fill when the analysis returns, without bouncing the user to the Conversation IA section.
     if (hooks.busy) {
-      box.innerHTML = `<div class="small">⏳ Analyse en cours… la grille se remplit dès que c'est prêt.</div>`;
+      box.innerHTML = `<div class="small" style="display:flex;align-items:center;justify-content:center;gap:8px"><span class="spinner sm"></span> Analyse en cours… la grille se remplit dès que c'est prêt.</div>`;
       el.appendChild(box);
       return;
     }
@@ -185,9 +187,10 @@ export function renderMetrics(m, hooks = {}) {
   cell("Confiance détection", id.confidence_0_1 != null ? Math.round(id.confidence_0_1 * 100) + " %" : "—", {
     bar: (id.confidence_0_1 ?? 0) * 100,
   });
+  const totalAreaHa = numOr(ps.total_area_ha);
   cell(
     "Parcelles",
-    `${ps.count ?? "—"} (${ps.total_area_ha != null ? ps.total_area_ha.toFixed(2) + " ha" : "?"})`
+    `${ps.count ?? "—"} (${totalAreaHa != null ? totalAreaHa.toFixed(2) + " ha" : "?"})`
   );
   cell("Vigueur", h.vigor_0_100 ?? "—", { bar: h.vigor_0_100 });
   cell("Pression maladies", h.disease_pressure_0_100 ?? "—", { bar: h.disease_pressure_0_100, invert: true });
@@ -221,12 +224,14 @@ export function renderMetrics(m, hooks = {}) {
     `${formatRelativeDays(ph.expected_harvest_in_days)}${ph.expected_harvest_window_iso ? ` <span class="small">(${ph.expected_harvest_window_iso})</span>` : ""}`,
     { full: true }
   );
-  cell("Rendement t/ha", y.estimated_t_per_ha != null ? y.estimated_t_per_ha.toFixed(1) : "—");
-  cell("Production totale", y.estimated_total_t != null ? y.estimated_total_t.toFixed(1) + " t" : "—");
+  const tPerHa = numOr(y.estimated_t_per_ha);
+  const totalT = numOr(y.estimated_total_t);
+  cell("Rendement t/ha", tPerHa != null ? tPerHa.toFixed(1) : "—");
+  cell("Production totale", totalT != null ? totalT.toFixed(1) + " t" : "—");
 
   // Effective price = user override if set, else model default.
-  const userPrice = mk.user_price_eur_per_kg;
-  const modelPrice = mk.indicative_price_eur_per_kg;
+  const userPrice = numOr(mk.user_price_eur_per_kg);
+  const modelPrice = numOr(mk.indicative_price_eur_per_kg);
   const effPrice = userPrice != null ? userPrice : modelPrice;
   const priceSource = userPrice != null ? "votre prix" : "défaut RNM";
   const priceColor = userPrice != null ? "var(--accent)" : "var(--muted)";
@@ -235,16 +240,17 @@ export function renderMetrics(m, hooks = {}) {
       ? `${effPrice.toFixed(2)} €/kg <span style="font-size:9px;color:${priceColor};font-weight:400">${priceSource}</span> <button id="price-edit" title="Modifier" style="margin-left:6px;background:transparent;border:1px solid var(--border);color:var(--muted);font-size:10px;padding:1px 5px;border-radius:3px;cursor:pointer">✏</button>`
       : `— <button id="price-edit" title="Définir" style="background:transparent;border:1px solid var(--border);color:var(--muted);font-size:10px;padding:1px 5px;border-radius:3px;cursor:pointer">✏ définir</button>`;
   cell("Prix vente (départ producteur)", priceVal);
-  let totalValue = mk.estimated_total_value_eur;
-  if (effPrice != null && y.estimated_total_t != null) totalValue = y.estimated_total_t * 1000 * effPrice;
+  let totalValue = numOr(mk.estimated_total_value_eur);
+  if (effPrice != null && totalT != null) totalValue = totalT * 1000 * effPrice;
   cell("Valeur estimée", fmtEUR(totalValue), { full: false });
 
   if (Array.isArray(ps.crops_breakdown) && ps.crops_breakdown.length > 1) {
     const txt = ps.crops_breakdown
-      .map(
-        (c) =>
-          `${CULTU_LABELS[c.code_cultu] || c.code_cultu}: ${c.area_ha?.toFixed(2)} ha (${c.share_pct?.toFixed(0)}%)`
-      )
+      .map((c) => {
+        const a = numOr(c.area_ha);
+        const sh = numOr(c.share_pct);
+        return `${CULTU_LABELS[c.code_cultu] || c.code_cultu}: ${a != null ? a.toFixed(2) : "?"} ha (${sh != null ? sh.toFixed(0) : "?"}%)`;
+      })
       .join(" · ");
     cell("Répartition cultures", txt, { full: true });
   }
@@ -474,7 +480,7 @@ export function renderDiseases(diseases, ctx) {
   const tPerHa = ctx?.t_per_ha;
   const pricePerKg = ctx?.price_eur_per_kg;
   const cropValuePerHa = tPerHa && pricePerKg ? tPerHa * 1000 * pricePerKg : null;
-  const areaHa = ctx?.total_area_ha;
+  const areaHa = numOr(ctx?.total_area_ha);
 
   // Combined-scenario panel: how do treating 0, 1, 2, … of the diseases compare?
   // Multiplicative loss model — addresses the "per-disease benefits don't sum" pitfall.
@@ -580,7 +586,7 @@ export function renderDiseases(diseases, ctx) {
                 <span class="small">${cost.methodLabel ? `(${cost.methodLabel} — ` : "("}prép. ${cost.prep.toFixed(1)} h/ha + applic. ${cost.apply.toFixed(1)} h/ha)</span></div>
               <div>Matériel / carburant / EPI : ${fmtEUR(cost.equipment)}/ha</div>
               <div style="border-top:1px solid var(--border);margin-top:4px;padding-top:4px"><b>Total ${fmtEUR(cost.total)}/ha</b></div>
-              ${ctx?.total_area_ha ? `<div class="small">Sur ${ctx.total_area_ha.toFixed(2)} ha : ${fmtEUR(cost.total * ctx.total_area_ha)} total</div>` : ""}
+              ${areaHa != null ? `<div class="small">Sur ${areaHa.toFixed(2)} ha : ${fmtEUR(cost.total * areaHa)} total</div>` : ""}
             </div>
           </li>`;
         })

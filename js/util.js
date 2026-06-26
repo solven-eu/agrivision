@@ -25,6 +25,23 @@ export function fmtEUR(v) {
   }).format(v);
 }
 
+// Coerce a value to a finite number, or null. The Vision model occasionally returns numeric
+// fields (yields, prices, costs) as strings ("7.2") or non-numeric junk ("?", "n/a") — this
+// guards .toFixed()/arithmetic at render time so a single stray string can't crash the grid.
+export function numOr(v, fallback = null) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : fallback;
+  if (typeof v === "string") {
+    let s = v.trim();
+    if (s === "") return fallback;
+    // French decimal comma → dot, but only when there's no dot already (don't mangle a value
+    // that uses comma as a thousands separator).
+    if (s.includes(",") && !s.includes(".")) s = s.replace(",", ".");
+    const n = parseFloat(s);
+    if (Number.isFinite(n)) return n;
+  }
+  return fallback;
+}
+
 // ---------- Geo / bearing ----------
 
 // Bearing from (lat1,lon1) to (lat2,lon2), degrees from north clockwise.

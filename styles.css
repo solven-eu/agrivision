@@ -1145,6 +1145,15 @@ a {
     transform: rotate(360deg);
   }
 }
+/* Small inline variant for "loading…" rows (grid empty-state, chat typing indicator). */
+.spinner.sm {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+  display: inline-block;
+  vertical-align: middle;
+  flex: none;
+}
 #loading-bar {
   width: 280px;
   height: 4px;
